@@ -1,3 +1,5 @@
+import wandb
+
 import os
 from datetime import datetime
 from utils.argument import get_args
@@ -27,6 +29,10 @@ def main():
     with open(args.log_dir + '/args.txt', 'w') as f:
         f.write(args_text_file)
 
+    '''
+    wandb.login()
+    wandb.init(config=args, project="hyundai_segnas", entity="hyundai_ai")
+
     # Data Preprocessing
     get_roi(args.data)
     dataset = get_dataset(args)
@@ -46,6 +52,7 @@ def main():
         # Model Testing
         args.writer = None
         inference(args, dataset)
+    '''
 
 if __name__ == "__main__":
     main()
