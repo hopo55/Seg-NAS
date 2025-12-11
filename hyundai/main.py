@@ -30,7 +30,7 @@ def main():
     # Data Preprocessing
     get_roi(args.data)
     dataset = get_dataset(args)
-
+    
     if args.mode in ['nas', 'ind', 'zero']:
         # Search Architecture
         searched_model = search_architecture(args, dataset)
