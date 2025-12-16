@@ -1,13 +1,14 @@
 import wandb
+from torch.utils.tensorboard import SummaryWriter
 
 import os
 from datetime import datetime
 from utils.argument import get_args
 from utils.utils import set_seed
-from preprocessing import get_roi, get_dataset
-from segmentation import search_architecture, train_searched_model
-from test import test_model, inference
-from torch.utils.tensorboard import SummaryWriter
+
+# from preprocessing import get_roi, get_dataset
+# from segmentation import search_architecture, train_searched_model
+# from test import test_model, inference
 
 
 def main():
@@ -29,10 +30,9 @@ def main():
     with open(args.log_dir + '/args.txt', 'w') as f:
         f.write(args_text_file)
 
+    wandb.init(config=args, project="Seg-NAS", entity="hopo55", name="hyundai")
+    
     '''
-    wandb.login()
-    wandb.init(config=args, project="hyundai_segnas", entity="hyundai_ai")
-
     # Data Preprocessing
     get_roi(args.data)
     dataset = get_dataset(args)

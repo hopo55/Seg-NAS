@@ -1,7 +1,13 @@
 # Dataset
 *.zip
-original
 *.jpg
+original
+image
+target
+
+# logs
+wandb/
+logs/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
