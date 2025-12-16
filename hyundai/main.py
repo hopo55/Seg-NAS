@@ -6,9 +6,9 @@ from datetime import datetime
 from utils.argument import get_args
 from utils.utils import set_seed
 
-# from preprocessing import get_roi, get_dataset
-# from segmentation import search_architecture, train_searched_model
-# from test import test_model, inference
+from preprocessing import get_roi, get_dataset
+from segmentation import search_architecture, train_searched_model
+from test import test_model, inference
 
 
 def main():
@@ -32,7 +32,6 @@ def main():
 
     wandb.init(config=args, project="Seg-NAS", entity="hopo55", name="hyundai")
     
-    '''
     # Data Preprocessing
     get_roi(args.data)
     dataset = get_dataset(args)
@@ -52,6 +51,7 @@ def main():
         # Model Testing
         args.writer = None
         inference(args, dataset)
+    '''
     '''
 
 if __name__ == "__main__":
