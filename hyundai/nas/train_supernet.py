@@ -1,5 +1,6 @@
 import os
 import torch
+from tqdm import tqdm
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
@@ -11,6 +12,7 @@ def train_warmup(model, train_loader, loss, optimizer_weight):
     train_loss = AverageMeter()
     train_iou = AverageMeter()
 
+    train_loader = tqdm(train_loader, desc="Warmup", total=len(train_loader))
     for data, labels in train_loader:
         data, labels = data.cuda(), labels.cuda()
         batch_size = data.size(0)
@@ -25,6 +27,10 @@ def train_warmup(model, train_loader, loss, optimizer_weight):
         train_iou.update(iou_score, batch_size)
 
         optimizer_weight.step()
+        train_loader.set_postfix(
+            loss=f"{train_loss.avg:.4f}",
+            iou=f"{train_iou.avg:.4f}",
+        )
 
     return train_loss.avg, train_iou.avg
 
@@ -44,6 +50,7 @@ def train_weight_alpha(
     train_a_loss = AverageMeter()
     train_a_iou = AverageMeter()
 
+    train_loader = tqdm(train_loader, desc="Train Weight", total=len(train_loader))
     for data, labels in train_loader:
         data, labels = data.cuda(), labels.cuda()
         batch_size = data.size(0)
@@ -55,7 +62,12 @@ def train_weight_alpha(
 
         loss_value.backward()
         optimizer_weight.step()
+        train_loader.set_postfix(
+            loss=f"{train_w_loss.avg:.4f}",
+            iou=f"{train_w_iou.avg:.4f}",
+        )
 
+    val_loader = tqdm(val_loader, desc="Train Alpha", total=len(val_loader))
     for data, labels in val_loader:
         data, labels = data.cuda(), labels.cuda()
         batch_size = data.size(0)
@@ -67,6 +79,10 @@ def train_weight_alpha(
 
         loss_value.backward()
         optimizer_alpha.step()
+        val_loader.set_postfix(
+            loss=f"{train_a_loss.avg:.4f}",
+            iou=f"{train_a_iou.avg:.4f}",
+        )
         
         nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
 
@@ -85,12 +101,14 @@ def test_architecture(model, test_loader):
         model.eval()
     test_iou = AverageMeter()
     
+    test_loader = tqdm(test_loader, desc="Test", total=len(test_loader))
     with torch.no_grad():
         for data, labels in test_loader:
             data, labels = data.cuda(), labels.cuda()
             batch_size = data.size(0)
             outputs = model(data)
             test_iou.update(get_iou_score(outputs, labels), batch_size)
+            test_loader.set_postfix(iou=f"{test_iou.avg:.4f}")
 
     return test_iou.avg
 

@@ -30,10 +30,10 @@ def main():
     with open(args.log_dir + '/args.txt', 'w') as f:
         f.write(args_text_file)
 
-    wandb.init(config=args, project="Seg-NAS", entity="hopo55", name="hyundai")
+    # wandb.init(config=args, project="Seg-NAS", entity="hopo55", name="hyundai")
     
     # Data Preprocessing
-    get_roi(args.data)
+    # get_roi(args.data)
     dataset = get_dataset(args)
     
     if args.mode in ['nas', 'ind', 'zero']:
