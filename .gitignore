@@ -6,6 +6,8 @@ original
 image
 target
 roi
+# model pt files
+*.pt
 
 # logs
 wandb/
