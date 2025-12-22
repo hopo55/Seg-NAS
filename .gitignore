@@ -1,9 +1,11 @@
 # Dataset
 *.zip
 *.jpg
+*.csv
 original
 image
 target
+roi
 
 # logs
 wandb/
