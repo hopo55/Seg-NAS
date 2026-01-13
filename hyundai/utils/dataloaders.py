@@ -10,8 +10,6 @@ import torch.nn.functional as F
 from torchvision import transforms
 from torch.utils.data import Dataset
 
-from utils.skeleton import skeleton
-
 # matplotlib.use('Agg')
 
 def set_transforms(resize=128):
@@ -375,25 +373,3 @@ class TestDataset(Dataset):
             cv2.drawContours(image, contours, -1, (255, 0, 0), 2)  # 빨간색 테두리 (0, 0, 255)
 
         cv2.imwrite(save_dir, cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
-
-    def calculate_width(self, args, idx, outputs):
-        save_dir, file_name = self.get_name(self.args.output_dir, idx, 'width')
-
-        mask_save_dir, mask_file_name = self.get_name(self.args.output_dir, idx, 'viz')
-        os.makedirs(mask_save_dir, exist_ok=True)
-        mask_save_dir = os.path.join(mask_save_dir, mask_file_name)
-
-        image = cv2.imread(self.data[idx])
-        image = cv2.resize(image, (self.args.resize, self.args.resize))
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
-        outputs = F.softmax(outputs, dim=1)
-        _, predicted = torch.max(outputs, dim=1)
-        output_numpy = predicted[0].cpu().numpy()
-        binary_image = (output_numpy * 255).astype(np.uint8)
-        binary_image = cv2.threshold(binary_image, 127, 255, cv2.THRESH_BINARY)[1]
-        binary_image_normalized = binary_image // 255
-
-        num_labels, labels_im = cv2.connectedComponents(binary_image_normalized)
-
-        skeleton(args, image, num_labels, labels_im, save_dir, file_name, mask_save_dir)
