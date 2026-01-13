@@ -117,13 +117,13 @@ def get_roi(names):
 
 def get_dataset(args):
     if args.mode in ['nas', 'hot'] and args.data != ['all']:
-        print(f"Error: The '{args.data}' option cannot be used in modes other than 'e2e', 'nas', or 'hot'.")
+        print(f"Error: The '{args.data}' option cannot be used in modes other than 'nas' or 'hot'.")
         sys.exit(1)
-    elif args.mode in ['e2e', 'ind'] and args.data == ['all']:
+    elif args.mode == 'ind' and args.data == ['all']:
         print("Error: The 'all' option cannot be used in 'ind' mode.")
         sys.exit(1)
     elif args.mode == 'zero' and (len(args.data) != 1 or args.data[0] not in ['ce', 'df', 'gn7norm', 'gn7pano']):
-        print("Error: In 'e2e' or 'zero' mode must be one of 'ce', 'df', 'gn7norm', 'gn7pano'.")
+        print("Error: In 'zero' mode must be one of 'ce', 'df', 'gn7norm', 'gn7pano'.")
         sys.exit(1)
 
     if args.data == ['all']:        
@@ -140,8 +140,8 @@ def get_dataset(args):
 
     transform = set_transforms(args.resize)
 
-    if args.mode == 'e2e' or args.mode == 'hot':
-        # set test dataset for e2e or hotstamping mode
+    if args.mode == 'hot':
+        # set test dataset for hotstamping mode
         _, _, test_data, test_ind_data = dataset
 
         return test_data, test_ind_data

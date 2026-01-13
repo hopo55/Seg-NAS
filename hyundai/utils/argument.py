@@ -7,12 +7,11 @@ def get_args():
     # Environment Argument
     parser.add_argument('--seed', type=int, default=42, help="Seed value to ensure reproducibility.")
     # Preprocessing Argument
-    parser.add_argument('--mode', type=str, default='nas', choices=['nas', 'ind', 'zero', 'hot', 'e2e'],
-                        help='(nas): train and test the optimized model\n'                         
+    parser.add_argument('--mode', type=str, default='nas', choices=['nas', 'ind', 'zero', 'hot'],
+                        help='(nas): train and test the optimized model\n'
                             '(ind): train and test individual models\n'
                             '(zero): training for zero-shot testing\n'
-                            '(hot): train and test a model on the hot-stamping dataset\n'
-                            '(e2e): end-to-end training from preprocessing to learning')
+                            '(hot): train and test a model on the hot-stamping dataset')
     parser.add_argument('--data', type=str, default=['all'], nargs='+', 
                         choices=['all', 'ce', 'df', 'gn7norm', 'gn7pano'],
                         help='select one or more datasets')
@@ -56,8 +55,6 @@ def get_args():
 
     if args.mode == 'hot':
         hotstamping_args(parser)
-    elif args.mode == 'e2e':
-        e2e_args(parser)
 
     args = parser.parse_args()
 
@@ -65,38 +62,6 @@ def get_args():
 
 # Hot-Stamping Arguments
 def hotstamping_args(parser):
-    parser.add_argument('--model_dir', type=str, required=False, 
+    parser.add_argument('--model_dir', type=str, required=False,
                         help='Path to the best_model.pt file')
-    
 
-# End-to-End Arguments
-def e2e_args(parser):
-    parser.add_argument('--model_dir', type=str, required=False, 
-                        help='Path to the best_model.pt file')
-    parser.add_argument('--output_dir', type=str, required=False, 
-                        help='Path to the best_model.pt file')
-    parser.add_argument('--viz_infer', type=lambda x: (str(x).lower() == 'true'), default=False, required=False,
-                        help='Visualize inferred results during testing to evaluate model predictions')
-    # Skeleton Arguments
-    parser.add_argument('--min_filtered_object_size', type=int, default=50, 
-                        help='Minimum filtered object size (default: 20)')
-    parser.add_argument('--min_threshold', type=float, default=0.5,
-                        help='Minimum threshold value (default: 0.5)')
-    parser.add_argument('--over_threshold', type=int, default=8,
-                        help='The maximum allowable length range for processing.')
-    parser.add_argument('--skeleton_window_size', type=int, default=20, 
-                        help='Window size for skeleton calculation (default: 20)')
-    parser.add_argument('--z_threshold', type=float, default=2.25, 
-                        help='Z-score threshold for outlier detection (default: 2.25)')
-    parser.add_argument('--step_size', type=int, default=5, 
-                        help='Step size for processing (default: 5)')
-    parser.add_argument('--pix_to_mm', type=float, default=0.14, 
-                        help='Pixel to millimeter conversion factor (default: 0.14)')
-    parser.add_argument('--processes', type=int, default=4,
-                        help='Number of processes to use for multiprocessing (default: 4)')
-    parser.add_argument('--min_NG_count', type=int, default=3,
-                        help='The minimum number of consecutive occurrences of the min_threshold.')
-    parser.add_argument('--viz_mode', type=str, default='contour', choices=['masking', 'contour'],
-                        help='choose "masking" or "contour" for visualization.')
-
-    

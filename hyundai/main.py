@@ -8,7 +8,7 @@ from utils.utils import set_seed
 
 from preprocessing import get_roi, get_dataset
 from segmentation import search_architecture, train_searched_model
-from test import test_model, inference
+from test import test_model
 
 
 def main():
@@ -47,12 +47,6 @@ def main():
         # Model Testing
         test_model(args, dataset)
         args.writer.close()
-    else:   # e2e
-        # Model Testing
-        args.writer = None
-        inference(args, dataset)
-    '''
-    '''
 
 if __name__ == "__main__":
     main()
