@@ -1,3 +1,4 @@
+import wandb
 import torch
 from torch.utils.data import DataLoader
 from utils.utils import AverageMeter, get_iou_score, set_device
@@ -42,7 +43,7 @@ def test_model(args, dataset):
     test_loader = DataLoader(test_dataset, batch_size=args.test_size, shuffle=False)
     test_iou = test_hotstamping(model, test_loader)
 
-    args.writer.add_scalars('HotStamping Test/IOU', {f'Test_mIoU]': test_iou})
+    wandb.log({'HotStamping Test/Test_mIoU': test_iou})
     print(f"TEST[ALL], Test IoU: {test_iou:.4f}")
 
     names = ["CE", "DF", "GN7 일반", "GN7 파노라마"]
@@ -54,5 +55,5 @@ def test_model(args, dataset):
         test_ind_loader = DataLoader(test_ind_dataset, batch_size=args.test_size, shuffle=False)
         test_ind_iou = test_hotstamping(model, test_ind_loader)
 
-        args.writer.add_scalars('HotStamping individual Test/IOU', {f'Test_mIoU[{matching_name}]': test_ind_iou})
+        wandb.log({f'HotStamping individual Test/Test_mIoU[{matching_name}]': test_ind_iou})
         print(f"TEST[{matching_name}], Test IoU: {test_ind_iou:.4f}")

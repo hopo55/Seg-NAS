@@ -1,5 +1,4 @@
 import wandb
-from torch.utils.tensorboard import SummaryWriter
 
 import os
 from datetime import datetime
@@ -22,15 +21,13 @@ def main():
     if args.mode == 'ind' or args.mode == 'zero':
         args.log_dir = os.path.join(args.log_dir, args.data[0])
     args.log_dir = os.path.join(args.log_dir, date_time)
-    args.writer = SummaryWriter(log_dir=args.log_dir)
-    args_text = "<br>".join([f"{arg}: {value}" for arg, value in vars(args).items()])
-    args.writer.add_text('Arguments', args_text)
-    
+    os.makedirs(args.log_dir, exist_ok=True)
+
     args_text_file = "\n".join([f"{arg}: {value}" for arg, value in vars(args).items()])
     with open(args.log_dir + '/args.txt', 'w') as f:
         f.write(args_text_file)
 
-    # wandb.init(config=args, project="Seg-NAS", entity="hopo55", name="hyundai")
+    wandb.init(config=args, project="Seg-NAS", entity="hopo55", name=f"hyundai_seed{args.seed}")
     
     # Data Preprocessing
     # get_roi(args.data)
@@ -42,11 +39,11 @@ def main():
         
         # Train and Test of the Optimized Architecture
         train_searched_model(args, searched_model, dataset)
-        args.writer.close()
+        wandb.finish()
     elif args.mode == 'hot':
         # Model Testing
         test_model(args, dataset)
-        args.writer.close()
+        wandb.finish()
 
 if __name__ == "__main__":
     main()

@@ -1,4 +1,5 @@
 import os
+import wandb
 import torch
 from tqdm import tqdm
 import torch.nn as nn
@@ -133,9 +134,12 @@ def train_architecture(
         train_loss, train_iou = train_warmup(model, train_loader, loss, optimizer_weight)
         test_iou = test_architecture(model, test_loader)
 
-        args.writer.add_scalars('Architecuter Warmup/Loss', {'Train_Loss': train_loss}, epoch)
-        args.writer.add_scalars('Architecuter Warmup/Train', {'Train_mIoU': train_iou}, epoch)
-        args.writer.add_scalars('Architecuter Warmup/Test', {'Test_mIoU': test_iou}, epoch)
+        wandb.log({
+            'Architecuter Warmup/Train_Loss': train_loss,
+            'Architecuter Warmup/Train_mIoU': train_iou,
+            'Architecuter Warmup/Test_mIoU': test_iou,
+            'epoch': epoch
+        })
 
         print(f"Epoch {epoch+1}/{args.epochs}, Train Loss: {train_loss:.4f}, Train IOU: {train_iou:.4f}, Test IOU: {test_iou:.4f}")
 
@@ -162,9 +166,14 @@ def train_architecture(
             os.makedirs(args.save_dir, exist_ok=True)
             torch.save(model.state_dict(), save_path)  # Save the model
 
-        args.writer.add_scalars('Architecuter Train/Loss', {'Weight_Loss': train_w_loss, 'Alpha_Loss': train_a_loss}, epoch)
-        args.writer.add_scalars('Architecuter Train/IOU', {'Weight_IOU': train_w_iou, 'Alpha_IOU': train_a_iou}, epoch)
-        args.writer.add_scalars('Architecuter Test/IOU', {'Test_mIoU': test_iou}, epoch)
+        wandb.log({
+            'Architecuter Train/Weight_Loss': train_w_loss,
+            'Architecuter Train/Alpha_Loss': train_a_loss,
+            'Architecuter Train/Weight_IOU': train_w_iou,
+            'Architecuter Train/Alpha_IOU': train_a_iou,
+            'Architecuter Test/Test_mIoU': test_iou,
+            'epoch': epoch
+        })
 
         print(
             f"Epoch {epoch+1}/{args.epochs}\n"

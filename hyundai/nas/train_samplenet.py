@@ -1,6 +1,7 @@
 import os
 import time
 import copy
+import wandb
 import torch
 import torch.nn as nn
 from torch.utils.data import ConcatDataset, DataLoader
@@ -90,14 +91,17 @@ def train_samplenet(
                     'model': best_model,  # Save the model structure
                 }, save_path)
 
-        # Log training and test metrics to TensorBoard
-        args.writer.add_scalars('SampleNet Train/Loss', {'Train_Loss': train_loss}, epoch)
-        args.writer.add_scalars('SampleNet Train/IOU', {'Train_mIoU' : train_iou}, epoch)
-        args.writer.add_scalars('SampleNet Test/IOU', {'Test_mIoU': test_iou}, epoch)
+        # Log training and test metrics to wandb
+        wandb.log({
+            'SampleNet Train/Train_Loss': train_loss,
+            'SampleNet Train/Train_mIoU': train_iou,
+            'SampleNet Test/Test_mIoU': test_iou,
+            'epoch': epoch
+        })
 
         print(f"Epoch {epoch+1}/{args.epochs}, Train Loss: {train_loss:.4f}, Train IoU: {train_iou:.4f}, Test IoU: {test_iou:.4f}")
 
-    args.writer.add_scalars('SampleNet Test/Best IOU', {'Best_mIoU': best_test_iou}, epoch)
+    wandb.log({'SampleNet Test/Best_mIoU': best_test_iou})
     
     if args.mode != 'ind':
         # Test individual car model
@@ -124,8 +128,10 @@ def train_samplenet(
             time_per_image = inference_time / num_images
             time_for_100_images = time_per_image * 100
 
-            args.writer.add_scalars('SampleNet individual Test/IOU', {f'Test_mIoU[{matching_name}]': test_ind_iou})
-            args.writer.add_scalars('SampleNet individual Test/Inference Time(100)', {f'Test_Inference_Time[{matching_name}]': time_for_100_images})
+            wandb.log({
+                f'SampleNet individual Test/Test_mIoU[{matching_name}]': test_ind_iou,
+                f'SampleNet individual Test/Inference_Time[{matching_name}]': time_for_100_images
+            })
 
             print(
                 f"TEST[{matching_name}], Test IoU: {test_ind_iou:.4f}, Inference Time(100 img): {time_for_100_images:.4f} seconds"
