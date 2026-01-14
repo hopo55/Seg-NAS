@@ -91,6 +91,12 @@ def train_samplenet(
                     'model': best_model,  # Save the model structure
                 }, save_path)
 
+            # Save args.txt to log_dir when best_model.pt is saved
+            os.makedirs(args.log_dir, exist_ok=True)
+            args_text = "\n".join([f"{arg}: {value}" for arg, value in vars(args).items()])
+            with open(os.path.join(args.log_dir, 'args.txt'), 'w') as f:
+                f.write(args_text)
+
         # Log training and test metrics to wandb
         wandb.log({
             'SampleNet Train/Train_Loss': train_loss,

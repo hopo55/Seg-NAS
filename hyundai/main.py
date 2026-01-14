@@ -1,6 +1,5 @@
 import wandb
 
-import os
 from datetime import datetime
 from utils.argument import get_args
 from utils.utils import set_seed
@@ -16,16 +15,9 @@ def main():
     args = get_args()
     set_seed(args.seed)
 
-    date_time = str(datetime.now().date()) + "/" + datetime.now().strftime("%H_%M_%S")
-    args.log_dir = os.path.join(args.log_dir, args.mode)
-    if args.mode == 'ind' or args.mode == 'zero':
-        args.log_dir = os.path.join(args.log_dir, args.data[0])
-    args.log_dir = os.path.join(args.log_dir, date_time)
-    os.makedirs(args.log_dir, exist_ok=True)
-
-    args_text_file = "\n".join([f"{arg}: {value}" for arg, value in vars(args).items()])
-    with open(args.log_dir + '/args.txt', 'w') as f:
-        f.write(args_text_file)
+    data_name = args.data if isinstance(args.data, str) else "_".join(args.data)
+    timestamp = str(datetime.now().date()) + "_" + datetime.now().strftime("%H_%M_%S")
+    args.log_dir = f"./hyundai/logs/{args.mode}_{data_name}_seed{args.seed}/{timestamp}/"
 
     wandb.init(config=args, project="Seg-NAS", entity="hopo55", name=f"hyundai_seed{args.seed}")
     

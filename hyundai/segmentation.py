@@ -32,8 +32,9 @@ def search_architecture(args, dataset):
     optimizer_alpha = torch.optim.Adam(alphas_params, lr=args.alpha_lr)
     optimizer_weight = torch.optim.Adam(weight_params, lr=args.weight_lr)
 
-    timestamp = "/" + datetime.now().strftime("%H_%M_%S")  + "/"
-    args.save_dir = "./checkpoints/" + str(datetime.now().date()) + timestamp
+    data_name = args.data if isinstance(args.data, str) else "_".join(args.data)
+    timestamp = str(datetime.now().date()) + "_" + datetime.now().strftime("%H_%M_%S")
+    args.save_dir = f"./hyundai/checkpoints/{args.mode}_{data_name}_seed{args.seed}/{timestamp}/"
 
     train_architecture(
         args,
