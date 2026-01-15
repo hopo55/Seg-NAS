@@ -7,7 +7,7 @@ import torch.nn as nn
 from torch.utils.data import ConcatDataset, DataLoader
 from utils.dataloaders import set_transforms, ImageDataset
 
-from utils.utils import AverageMeter, get_iou_score
+from utils.utils import AverageMeter, get_iou_score, measure_inference_time
 
 # train warmup
 def train_opt(model, train_loader, loss, optimizer):
@@ -108,7 +108,22 @@ def train_samplenet(
         print(f"Epoch {epoch+1}/{args.epochs}, Train Loss: {train_loss:.4f}, Train IoU: {train_iou:.4f}, Test IoU: {test_iou:.4f}")
 
     wandb.log({'SampleNet Test/Best_mIoU': best_test_iou})
-    
+
+    # Measure inference time (paper-style: warmup + multiple runs)
+    device = next(best_model.parameters()).device
+    mean_time, std_time = measure_inference_time(
+        best_model,
+        input_size=(1, 3, args.resize, args.resize),
+        device=device,
+        num_warmup=50,
+        num_runs=100
+    )
+    wandb.log({
+        'Model/Inference_Time_Mean (ms)': mean_time,
+        'Model/Inference_Time_Std (ms)': std_time
+    })
+    print(f"OptimizedNetwork Inference Time: {mean_time:.4f} ± {std_time:.4f} ms (batch=1)")
+
     if args.mode != 'ind':
         # Test individual car model
         names = ["CE", "DF", "GN7 일반", "GN7 파노라마"]
@@ -120,25 +135,13 @@ def train_samplenet(
 
             test_ind_loader = DataLoader(test_ind_dataset, batch_size=args.test_size, shuffle=False)
 
-            torch.cuda.synchronize()
-            inference_start_time = time.time()
-
-            # error
+            # Test mIoU
             test_ind_iou = test_opt(best_model, test_ind_loader)
-
-            torch.cuda.synchronize()
-            inference_end_time = time.time()
-
-            inference_time = inference_end_time - inference_start_time
-            num_images = len(test_ind_dataset)
-            time_per_image = inference_time / num_images
-            time_for_100_images = time_per_image * 100
 
             wandb.log({
                 f'SampleNet individual Test/Test_mIoU[{matching_name}]': test_ind_iou,
-                f'SampleNet individual Test/Inference_Time[{matching_name}]': time_for_100_images
             })
 
             print(
-                f"TEST[{matching_name}], Test IoU: {test_ind_iou:.4f}, Inference Time(100 img): {time_for_100_images:.4f} seconds"
+                f"TEST[{matching_name}], Test IoU: {test_ind_iou:.4f}"
             )

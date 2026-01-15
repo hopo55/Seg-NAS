@@ -120,3 +120,52 @@ def get_model_complexity(model, input_size=(1, 3, 128, 128), device='cuda'):
     params_m = params / 1e6
 
     return gflops, params_m
+
+
+def measure_inference_time(model, input_size=(1, 3, 128, 128), device='cuda',
+                           num_warmup=50, num_runs=100):
+    """
+    Measure inference time for NAS paper experiments.
+
+    Args:
+        model: PyTorch model to measure
+        input_size: Input tensor size (batch, C, H, W)
+        device: Device to run inference on
+        num_warmup: Number of warmup runs for GPU stabilization
+        num_runs: Number of actual measurement runs
+
+    Returns:
+        mean_time: Mean inference time in milliseconds
+        std_time: Standard deviation of inference time in milliseconds
+    """
+    # Handle DataParallel
+    if isinstance(model, torch.nn.DataParallel):
+        model_to_measure = model.module
+    else:
+        model_to_measure = model
+
+    model_to_measure.eval()
+    dummy_input = torch.randn(input_size).to(device)
+
+    # Warmup runs (GPU stabilization)
+    with torch.no_grad():
+        for _ in range(num_warmup):
+            _ = model_to_measure(dummy_input)
+
+    # Actual measurement
+    torch.cuda.synchronize()
+    times = []
+
+    with torch.no_grad():
+        for _ in range(num_runs):
+            torch.cuda.synchronize()
+            start = time.time()
+            _ = model_to_measure(dummy_input)
+            torch.cuda.synchronize()
+            end = time.time()
+            times.append((end - start) * 1000)  # Convert to milliseconds
+
+    mean_time = np.mean(times)
+    std_time = np.std(times)
+
+    return mean_time, std_time

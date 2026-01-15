@@ -77,6 +77,30 @@ class SuperNet(nn.Module):
         ]
         return alpha_list
 
+    def get_expected_flops(self, input_size=128):
+        """
+        Calculate expected FLOPs of decoder based on alpha weights (differentiable).
+        Only calculates decoder FLOPs (encoder is fixed).
+        """
+        # Output sizes for each deconv layer (input_size -> /32 -> upsample)
+        H = input_size // 32  # After encoder: 128 -> 4
+        sizes = [
+            (H * 2, H * 2),      # deconv1: 4 -> 8
+            (H * 4, H * 4),      # deconv2: 8 -> 16
+            (H * 8, H * 8),      # deconv3: 16 -> 32
+            (H * 16, H * 16),    # deconv4: 32 -> 64
+            (H * 32, H * 32),    # deconv5: 64 -> 128
+        ]
+
+        total_flops = 0
+        total_flops += self.deconv1.get_expected_flops(sizes[0][0], sizes[0][1])
+        total_flops += self.deconv2.get_expected_flops(sizes[1][0], sizes[1][1])
+        total_flops += self.deconv3.get_expected_flops(sizes[2][0], sizes[2][1])
+        total_flops += self.deconv4.get_expected_flops(sizes[3][0], sizes[3][1])
+        total_flops += self.deconv5.get_expected_flops(sizes[4][0], sizes[4][1])
+
+        return total_flops / 1e9  # Return in GFLOPs
+
 
 class OptimizedNetwork(nn.Module):
     def __init__(self, super_net):

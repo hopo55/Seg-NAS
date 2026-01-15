@@ -68,31 +68,44 @@ def train_weight_alpha(
             iou=f"{train_w_iou.avg:.4f}",
         )
 
+    train_a_flops = AverageMeter()
     val_loader = tqdm(val_loader, desc="Train Alpha", total=len(val_loader))
     for data, labels in val_loader:
         data, labels = data.cuda(), labels.cuda()
         batch_size = data.size(0)
         optimizer_alpha.zero_grad()
         outputs = model(data)
-        loss_value = loss(outputs, labels)
-        train_a_loss.update(loss_value.item(), batch_size)
+        ce_loss = loss(outputs, labels)
+
+        # Multi-objective: Add FLOPs penalty
+        if isinstance(model, torch.nn.DataParallel):
+            expected_flops = model.module.get_expected_flops(args.resize)
+        else:
+            expected_flops = model.get_expected_flops(args.resize)
+
+        flops_penalty = args.flops_lambda * expected_flops
+        total_loss = ce_loss + flops_penalty
+
+        train_a_loss.update(ce_loss.item(), batch_size)
+        train_a_flops.update(expected_flops.item(), batch_size)
         train_a_iou.update(get_iou_score(outputs, labels), batch_size)
 
-        loss_value.backward()
-        optimizer_alpha.step()
-        val_loader.set_postfix(
-            loss=f"{train_a_loss.avg:.4f}",
-            iou=f"{train_a_iou.avg:.4f}",
-        )
-        
+        total_loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
+        optimizer_alpha.step()
 
         if isinstance(model, torch.nn.DataParallel):
             model.module.clip_alphas()
         else:
             model.clip_alphas()
 
-    return train_w_loss.avg, train_w_iou.avg, train_a_loss.avg, train_a_iou.avg
+        val_loader.set_postfix(
+            loss=f"{train_a_loss.avg:.4f}",
+            flops=f"{train_a_flops.avg:.4f}",
+            iou=f"{train_a_iou.avg:.4f}",
+        )
+
+    return train_w_loss.avg, train_w_iou.avg, train_a_loss.avg, train_a_iou.avg, train_a_flops.avg
 
 # test search architecture
 def test_architecture(model, test_loader):
@@ -145,8 +158,11 @@ def train_architecture(
 
 
     print("Supernet training has started...")
+    if args.flops_lambda > 0:
+        print(f"Multi-objective NAS enabled with flops_lambda={args.flops_lambda}")
+
     for epoch in range(args.warmup_epochs, args.epochs):
-        train_w_loss, train_w_iou, train_a_loss, train_a_iou = (
+        train_w_loss, train_w_iou, train_a_loss, train_a_iou, train_a_flops = (
             train_weight_alpha(
                 args,
                 model,
@@ -167,17 +183,18 @@ def train_architecture(
             torch.save(model.state_dict(), save_path)  # Save the model
 
         wandb.log({
-            'Architecuter Train/Weight_Loss': train_w_loss,
-            'Architecuter Train/Alpha_Loss': train_a_loss,
-            'Architecuter Train/Weight_IOU': train_w_iou,
-            'Architecuter Train/Alpha_IOU': train_a_iou,
-            'Architecuter Test/Test_mIoU': test_iou,
+            'Architecture Train/Weight_Loss': train_w_loss,
+            'Architecture Train/Alpha_Loss': train_a_loss,
+            'Architecture Train/Weight_mIoU': train_w_iou,
+            'Architecture Train/Alpha_mIoU': train_a_iou,
+            'Architecture Train/Expected_FLOPs (GFLOPs)': train_a_flops,
+            'Architecture Test/Test_mIoU': test_iou,
             'epoch': epoch
         })
 
         print(
             f"Epoch {epoch+1}/{args.epochs}\n"
-            f"[Train W] Weight Loss: {train_w_loss:.4f}, Weight IOU: {train_w_iou:.4f}\n"
-            f"[Train A] Alpha Loss: {train_a_loss:.4f}, Alpha IOU: {train_a_iou:.4f}\n"
-            f"[Test] IOU: {test_iou:.4f}"
+            f"[Train W] Weight Loss: {train_w_loss:.4f}, Weight mIoU: {train_w_iou:.4f}\n"
+            f"[Train A] Alpha Loss: {train_a_loss:.4f}, Alpha mIoU: {train_a_iou:.4f}, Expected FLOPs: {train_a_flops:.4f} GFLOPs\n"
+            f"[Test] mIoU: {test_iou:.4f}"
         )

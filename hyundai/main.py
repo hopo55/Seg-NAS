@@ -6,6 +6,7 @@ from utils.utils import set_seed
 
 from preprocessing import get_roi, get_dataset
 from segmentation import search_architecture, train_searched_model
+from comparison import run_comparison
 from test import test_model
 
 
@@ -28,9 +29,17 @@ def main():
     if args.mode in ['nas', 'ind', 'zero']:
         # Search Architecture
         searched_model = search_architecture(args, dataset)
-        
+
         # Train and Test of the Optimized Architecture
         train_searched_model(args, searched_model, dataset)
+
+        # Run comparison with baseline models if enabled
+        if args.comparison:
+            print("\n" + "=" * 60)
+            print("Running Baseline Comparison")
+            print("=" * 60)
+            run_comparison(args, dataset)
+
         wandb.finish()
     elif args.mode == 'hot':
         # Model Testing

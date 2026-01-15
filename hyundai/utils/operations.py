@@ -72,3 +72,22 @@ class MixedOp(nn.Module):
     def get_max_op(self):
         # return the operation with the maximum alpha
         return self._ops[self.get_max_alpha_idx()]
+
+    def get_expected_flops(self, H_out, W_out):
+        """
+        Calculate expected FLOPs based on alpha weights (differentiable).
+        ConvTranspose2d FLOPs: kernel^2 * C_in * C_out * H_out * W_out
+        """
+        kernel_sizes = [3, 5, 7]
+        C_in = self._ops[0].in_channels
+        C_out = self._ops[0].out_channels
+
+        flops_per_op = []
+        for k in kernel_sizes:
+            flops = k * k * C_in * C_out * H_out * W_out
+            flops_per_op.append(flops)
+
+        flops_tensor = torch.tensor(flops_per_op, device=self.alphas.device, dtype=torch.float32)
+        expected_flops = (self.alphas * flops_tensor).sum()
+
+        return expected_flops

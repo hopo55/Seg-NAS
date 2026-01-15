@@ -40,9 +40,17 @@ def get_args():
                         help='Number of training epochs (default: 50)')
     parser.add_argument('--clip_grad', type=float, default=5.0, 
                         help='Maximum gradient clipping value (default: 5.0)')
-    parser.add_argument('--opt_lr', type=float, default=5e-4, 
+    parser.add_argument('--opt_lr', type=float, default=5e-4,
                         help='Learning rate for optimzied network (default: 5e-4)')
-    parser.add_argument('--save_dir', type=str, default='./checkpoints', 
+    parser.add_argument('--flops_lambda', type=float, default=0.0,
+                        help='FLOPs penalty weight for multi-objective NAS (default: 0.0, no penalty)')
+    parser.add_argument('--comparison', action='store_true',
+                        help='Run comparison with baseline models (AutoPatch, RealtimeSeg style)')
+    parser.add_argument('--baseline_models', type=str, nargs='+',
+                        default=['autopatch', 'realtimeseg', 'unet', 'deeplabv3plus'],
+                        choices=['autopatch', 'realtimeseg', 'unet', 'deeplabv3plus'],
+                        help='Baseline models to compare (default: all)')
+    parser.add_argument('--save_dir', type=str, default='./checkpoints',
                         help='Directory to save trained model checkpoints (default: ./checkpoints)')
     parser.add_argument('--log_dir', type=str, default='./logs',
                         help="Directory to save TensorBoard logs")
