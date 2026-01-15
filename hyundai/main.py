@@ -18,9 +18,11 @@ def main():
 
     data_name = args.data if isinstance(args.data, str) else "_".join(args.data)
     timestamp = str(datetime.now().date()) + "_" + datetime.now().strftime("%H_%M_%S")
-    args.log_dir = f"./hyundai/logs/{args.mode}_{data_name}_seed{args.seed}/{timestamp}/"
+    args.log_dir = f"./hyundai/logs/{args.mode}_{data_name}_seed{args.seed}_lambda{args.flops_lambda}/{timestamp}/"
 
-    wandb.init(config=args, project="Seg-NAS", entity="hopo55", name=f"hyundai_seed{args.seed}")
+    # Include λ in run name for ablation study identification
+    run_name = f"hyundai_seed{args.seed}_λ{args.flops_lambda}"
+    wandb.init(config=args, project="Seg-NAS", entity="hopo55", name=run_name)
     
     # Data Preprocessing
     # get_roi(args.data)

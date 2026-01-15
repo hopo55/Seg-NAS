@@ -35,7 +35,7 @@ def search_architecture(args, dataset):
 
     data_name = args.data if isinstance(args.data, str) else "_".join(args.data)
     timestamp = str(datetime.now().date()) + "_" + datetime.now().strftime("%H_%M_%S")
-    args.save_dir = f"./hyundai/checkpoints/{args.mode}_{data_name}_seed{args.seed}/{timestamp}/"
+    args.save_dir = f"./hyundai/checkpoints/{args.mode}_{data_name}_seed{args.seed}_lambda{args.flops_lambda}/{timestamp}/"
 
     train_architecture(
         args,

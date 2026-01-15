@@ -24,13 +24,16 @@ EPOCHS=50
 # Multi-objective NAS Settings
 FLOPS_LAMBDA=0.0  # Set > 0 for FLOPs-aware search (e.g., 0.1, 0.3, 0.5)
 
+# Lambda Ablation Study Settings
+ABLATION=false  # Set to true to run λ ablation study
+LAMBDA_VALUES=(0.0 0.01 0.05 0.1 0.5 1.0)  # λ values for Pareto front
+
 # Comparison Settings (AutoPatch, RealtimeSeg style baselines)
 COMPARISON=false  # Set to true to run baseline comparisons
 BASELINE_MODELS="autopatch realtimeseg unet deeplabv3plus"
 
-# Run Seed Stability Analysis
+# Run Experiments
 PYTHON=${PYTHON:-python3}
-echo "Starting Seed Stability Analysis with ${#SEEDS[@]} seeds: ${SEEDS[*]}"
 
 # Build comparison arguments
 COMPARISON_ARGS=""
@@ -39,9 +42,13 @@ if [ "$COMPARISON" = true ]; then
     echo "Baseline comparison enabled: $BASELINE_MODELS"
 fi
 
-for SEED in "${SEEDS[@]}"; do
+# Function to run a single experiment
+run_experiment() {
+    local SEED=$1
+    local LAMBDA=$2
+
     echo "========================================"
-    echo "Running experiment with seed: $SEED"
+    echo "Running experiment: seed=$SEED, λ=$LAMBDA"
     echo "========================================"
     $PYTHON hyundai/main.py \
         --seed $SEED \
@@ -60,9 +67,38 @@ for SEED in "${SEEDS[@]}"; do
         --epochs $EPOCHS \
         --clip_grad $CLIP \
         --opt_lr $OPT_LR \
-        --flops_lambda $FLOPS_LAMBDA \
+        --flops_lambda $LAMBDA \
         $COMPARISON_ARGS
-done
-echo "========================================"
-echo "Seed Stability Analysis completed!"
-echo "========================================"
+}
+
+# Run experiments based on mode
+if [ "$ABLATION" = true ]; then
+    echo "=========================================="
+    echo "Starting λ Ablation Study"
+    echo "λ values: ${LAMBDA_VALUES[*]}"
+    echo "Seeds: ${SEEDS[*]}"
+    echo "=========================================="
+
+    for LAMBDA in "${LAMBDA_VALUES[@]}"; do
+        for SEED in "${SEEDS[@]}"; do
+            run_experiment $SEED $LAMBDA
+        done
+    done
+
+    echo "=========================================="
+    echo "λ Ablation Study completed!"
+    echo "=========================================="
+else
+    echo "=========================================="
+    echo "Starting Seed Stability Analysis"
+    echo "Seeds: ${SEEDS[*]}"
+    echo "=========================================="
+
+    for SEED in "${SEEDS[@]}"; do
+        run_experiment $SEED $FLOPS_LAMBDA
+    done
+
+    echo "=========================================="
+    echo "Seed Stability Analysis completed!"
+    echo "=========================================="
+fi

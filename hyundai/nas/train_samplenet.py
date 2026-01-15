@@ -64,6 +64,9 @@ def train_samplenet(
     best_model = None
     best_test_iou = -float('inf')
 
+    # Track retrain time
+    retrain_start_time = time.time()
+
     print("SampleNet training has started...")
     for epoch in range(args.epochs):
         train_loss, train_iou = train_opt(model, train_loader, loss, optimizer)
@@ -108,6 +111,12 @@ def train_samplenet(
         print(f"Epoch {epoch+1}/{args.epochs}, Train Loss: {train_loss:.4f}, Train IoU: {train_iou:.4f}, Test IoU: {test_iou:.4f}")
 
     wandb.log({'SampleNet Test/Best_mIoU': best_test_iou})
+
+    # Log retrain time
+    retrain_end_time = time.time()
+    retrain_hours = (retrain_end_time - retrain_start_time) / 3600
+    wandb.log({'Search Cost/Retrain (GPU hours)': retrain_hours})
+    print(f"Retrain completed in {retrain_hours:.4f} GPU hours")
 
     # Measure inference time (paper-style: warmup + multiple runs)
     device = next(best_model.parameters()).device

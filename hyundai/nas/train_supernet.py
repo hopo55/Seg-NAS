@@ -1,4 +1,5 @@
 import os
+import time
 import wandb
 import torch
 from tqdm import tqdm
@@ -142,6 +143,9 @@ def train_architecture(
 
     best_test_iou = -float('inf')
 
+    # Track GPU hours for each phase
+    warmup_start_time = time.time()
+
     print("Warmup training has started...")
     for epoch in range(args.warmup_epochs):
         train_loss, train_iou = train_warmup(model, train_loader, loss, optimizer_weight)
@@ -156,6 +160,14 @@ def train_architecture(
 
         print(f"Epoch {epoch+1}/{args.epochs}, Train Loss: {train_loss:.4f}, Train IOU: {train_iou:.4f}, Test IOU: {test_iou:.4f}")
 
+    # Log warmup time
+    warmup_end_time = time.time()
+    warmup_hours = (warmup_end_time - warmup_start_time) / 3600
+    wandb.log({'Search Cost/Warmup (GPU hours)': warmup_hours})
+    print(f"Warmup completed in {warmup_hours:.4f} GPU hours")
+
+    # Track search phase time
+    search_start_time = time.time()
 
     print("Supernet training has started...")
     if args.flops_lambda > 0:
@@ -198,3 +210,14 @@ def train_architecture(
             f"[Train A] Alpha Loss: {train_a_loss:.4f}, Alpha mIoU: {train_a_iou:.4f}, Expected FLOPs: {train_a_flops:.4f} GFLOPs\n"
             f"[Test] mIoU: {test_iou:.4f}"
         )
+
+    # Log search time
+    search_end_time = time.time()
+    search_hours = (search_end_time - search_start_time) / 3600
+    total_search_hours = warmup_hours + search_hours
+    wandb.log({
+        'Search Cost/Search (GPU hours)': search_hours,
+        'Search Cost/Total Search (GPU hours)': total_search_hours,
+    })
+    print(f"Search completed in {search_hours:.4f} GPU hours")
+    print(f"Total search cost: {total_search_hours:.4f} GPU hours")
