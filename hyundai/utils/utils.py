@@ -86,3 +86,37 @@ def move_sections(car_name, section):
         return time_to_wait
     else:
         return 0
+
+
+def get_model_complexity(model, input_size=(1, 3, 128, 128), device='cuda'):
+    """
+    Calculate FLOPs and Parameters of a model.
+
+    Args:
+        model: PyTorch model
+        input_size: Input tensor size (batch, channels, height, width)
+        device: Device to run the model on
+
+    Returns:
+        flops: FLOPs in GFLOPs
+        params: Parameters in millions
+    """
+    from thop import profile, clever_format
+
+    # Handle DataParallel
+    if isinstance(model, torch.nn.DataParallel):
+        model_to_profile = model.module
+    else:
+        model_to_profile = model
+
+    model_to_profile.eval()
+    dummy_input = torch.randn(input_size).to(device)
+
+    with torch.no_grad():
+        flops, params = profile(model_to_profile, inputs=(dummy_input,), verbose=False)
+
+    # Convert to GFLOPs and millions
+    gflops = flops / 1e9
+    params_m = params / 1e6
+
+    return gflops, params_m

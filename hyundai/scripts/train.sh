@@ -1,6 +1,7 @@
 # Set Experiment Settings
 # Seed Stability Analysis: 5 seeds commonly used for reproducibility verification
-SEEDS=(1)
+# SEEDS=(0 1 2 42 123)
+SEEDS=(42)
 MODE='nas'
 DATA='all'
 GPU='0 1'

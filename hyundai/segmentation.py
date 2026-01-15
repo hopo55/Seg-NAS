@@ -2,7 +2,8 @@ import torch
 import torch.nn as nn
 from datetime import datetime
 
-from utils.utils import set_device, check_tensor_in_list
+import wandb
+from utils.utils import set_device, check_tensor_in_list, get_model_complexity
 from nas.supernet_dense import SuperNet, OptimizedNetwork
 from nas.train_supernet import train_architecture
 from nas.train_samplenet import train_samplenet
@@ -49,7 +50,7 @@ def search_architecture(args, dataset):
 
 def train_searched_model(args, opt_model, dataset):
     device = set_device(args.gpu_idx)
-    
+
     opt_model = OptimizedNetwork(opt_model)
     if len(args.gpu_idx) >= 2:
         opt_model = torch.nn.DataParallel(opt_model, device_ids=args.gpu_idx).to(device)
@@ -57,6 +58,14 @@ def train_searched_model(args, opt_model, dataset):
     else:
         opt_model.to(device)
         print(f"Using single GPU: cuda:{args.gpu_idx[0]}")
+
+    # Measure FLOPs and Parameters for Pareto analysis
+    gflops, params_m = get_model_complexity(opt_model, input_size=(1, 3, args.resize, args.resize), device=device)
+    print(f"OptimizedNetwork - FLOPs: {gflops:.4f} GFLOPs, Parameters: {params_m:.4f} M")
+    wandb.log({
+        'Model/FLOPs (GFLOPs)': gflops,
+        'Model/Parameters (M)': params_m
+    })
 
     loss = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(opt_model.parameters(), lr=args.opt_lr)
