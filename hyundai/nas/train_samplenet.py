@@ -7,16 +7,17 @@ import torch.nn as nn
 from torch.utils.data import ConcatDataset, DataLoader
 from utils.dataloaders import set_transforms, ImageDataset
 
-from utils.utils import AverageMeter, get_iou_score, measure_inference_time
+from utils.utils import AverageMeter, get_iou_score, measure_inference_time, set_device
 
 # train warmup
 def train_opt(model, train_loader, loss, optimizer):
     model.train()
     train_loss = AverageMeter()
     train_iou = AverageMeter()
+    device = next(model.parameters()).device
 
     for data, labels in train_loader:
-        data, labels = data.cuda(), labels.cuda()
+        data, labels = data.to(device), labels.to(device)
         batch_size = data.size(0)
         optimizer.zero_grad()
         outputs = model(data)
@@ -39,10 +40,11 @@ def test_opt(model, test_loader):
     else:
         model.eval()
     test_iou = AverageMeter()
+    device = next(model.parameters()).device
     
     with torch.no_grad():
         for data, labels in test_loader:
-            data, labels = data.cuda(), labels.cuda()
+            data, labels = data.to(device), labels.to(device)
             batch_size = data.size(0)
             outputs = model(data)
             test_iou.update(get_iou_score(outputs, labels), batch_size)
@@ -56,6 +58,12 @@ def train_samplenet(
     loss,
     optimizer,
 ):
+    device = set_device(args.gpu_idx)
+    if isinstance(model, torch.nn.DataParallel):
+        model.module.to(device)
+    else:
+        model.to(device)
+
     train_dataset, val_dataset, test_dataset, test_ind_data = dataset
     train_dataset = ConcatDataset([train_dataset, val_dataset])
     train_loader = DataLoader(train_dataset, batch_size=args.train_size, shuffle=True)

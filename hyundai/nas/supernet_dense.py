@@ -1,3 +1,4 @@
+import copy
 import torch
 from torch import nn
 from torchvision.models import DenseNet121_Weights, densenet121
@@ -107,25 +108,20 @@ class OptimizedNetwork(nn.Module):
         super(OptimizedNetwork, self).__init__()
 
         if isinstance(super_net, torch.nn.DataParallel):
-            self.pretrained_net = super_net.module.pretrained_net
-
-            self.deconv1 = super_net.module.deconv1.get_max_op()
-            self.deconv2 = super_net.module.deconv2.get_max_op()
-            self.deconv3 = super_net.module.deconv3.get_max_op()
-            self.deconv4 = super_net.module.deconv4.get_max_op()
-            self.deconv5 = super_net.module.deconv5.get_max_op()
-
-            self.classifier = super_net.module.classifier
+            module = super_net.module
         else:
-            self.pretrained_net = super_net.pretrained_net
+            module = super_net
 
-            self.deconv1 = super_net.deconv1.get_max_op()
-            self.deconv2 = super_net.deconv2.get_max_op()
-            self.deconv3 = super_net.deconv3.get_max_op()
-            self.deconv4 = super_net.deconv4.get_max_op()
-            self.deconv5 = super_net.deconv5.get_max_op()
+        # Use deepcopy to create independent copies that can be properly moved to device
+        self.pretrained_net = copy.deepcopy(module.pretrained_net)
 
-            self.classifier = super_net.classifier
+        self.deconv1 = copy.deepcopy(module.deconv1.get_max_op())
+        self.deconv2 = copy.deepcopy(module.deconv2.get_max_op())
+        self.deconv3 = copy.deepcopy(module.deconv3.get_max_op())
+        self.deconv4 = copy.deepcopy(module.deconv4.get_max_op())
+        self.deconv5 = copy.deepcopy(module.deconv5.get_max_op())
+
+        self.classifier = copy.deepcopy(module.classifier)
 
     def forward(self, x):
         output = self.pretrained_net(x)

@@ -12,12 +12,16 @@ def search_architecture(args, dataset):
     device = set_device(args.gpu_idx)
 
     model = SuperNet(n_class=2)
-    if len(args.gpu_idx) >= 2:
-        model = torch.nn.DataParallel(model, device_ids=args.gpu_idx).to(device)
+    model = model.to(device)
+    use_dp = torch.cuda.is_available() and len(args.gpu_idx) >= 2
+    if use_dp:
+        model = torch.nn.DataParallel(model, device_ids=args.gpu_idx)
         print(f"Using multiple GPUs: {args.gpu_idx}")
     else:
-        model.to(device)
-        print(f"Using single GPU: cuda:{args.gpu_idx[0]}")
+        if device.type == "cuda":
+            print(f"Using single GPU: cuda:{args.gpu_idx[0]}")
+        else:
+            print("Using CPU")
 
     loss = nn.CrossEntropyLoss()
 
@@ -52,12 +56,16 @@ def train_searched_model(args, opt_model, dataset):
     device = set_device(args.gpu_idx)
 
     opt_model = OptimizedNetwork(opt_model)
-    if len(args.gpu_idx) >= 2:
-        opt_model = torch.nn.DataParallel(opt_model, device_ids=args.gpu_idx).to(device)
+    opt_model = opt_model.to(device)
+    use_dp = torch.cuda.is_available() and len(args.gpu_idx) >= 2
+    if use_dp:
+        opt_model = torch.nn.DataParallel(opt_model, device_ids=args.gpu_idx)
         print(f"Using multiple GPUs: {args.gpu_idx}")
     else:
-        opt_model.to(device)
-        print(f"Using single GPU: cuda:{args.gpu_idx[0]}")
+        if device.type == "cuda":
+            print(f"Using single GPU: cuda:{args.gpu_idx[0]}")
+        else:
+            print("Using CPU")
 
     # Measure FLOPs and Parameters for Pareto analysis
     gflops, params_m = get_model_complexity(opt_model, input_size=(1, 3, args.resize, args.resize), device=device)

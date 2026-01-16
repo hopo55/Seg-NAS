@@ -18,8 +18,8 @@ W_LR=0.001
 OPT_LR=0.001
 W_DECAY=2e-4
 CLIP=5.0
-W_EPOCHS=5
-EPOCHS=50
+W_EPOCHS=2
+EPOCHS=10
 
 # Multi-objective NAS Settings
 FLOPS_LAMBDA=0.0  # Set > 0 for FLOPs-aware search (e.g., 0.1, 0.3, 0.5)
