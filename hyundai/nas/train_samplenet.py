@@ -1,6 +1,7 @@
 import os
 import time
 import copy
+import gc
 import wandb
 import torch
 import torch.nn as nn
@@ -162,3 +163,10 @@ def train_samplenet(
             print(
                 f"TEST[{matching_name}], Test IoU: {test_ind_iou:.4f}"
             )
+
+    # Explicit cleanup to reduce GPU memory fragmentation between seeds
+    del best_model
+    del model
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()

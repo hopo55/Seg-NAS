@@ -49,16 +49,20 @@ class AverageMeter:
         self.avg = self.sum / self.count
 
 def get_iou_score(outputs, labels):
-    labels = torch.argmax(labels, dim=1)    # target 기준으로 더 큰 경우만 1로 가져옴
-    labels = labels.long()
+    with torch.no_grad():
+        labels = labels.detach()
+        outputs = outputs.detach()
 
-    outputs = F.softmax(outputs, dim=1)
-    _, predicted = torch.max(outputs, dim=1)
+        labels = torch.argmax(labels, dim=1)    # target 기준으로 더 큰 경우만 1로 가져옴
+        labels = labels.long()
 
-    tp, fp, fn, tn = smp.metrics.get_stats(predicted, labels, mode="multiclass", num_classes=2)
-    iou_score = smp.metrics.iou_score(tp, fp, fn, tn)
+        outputs = F.softmax(outputs, dim=1)
+        _, predicted = torch.max(outputs, dim=1)
 
-    miou = iou_score.mean().item()
+        tp, fp, fn, tn = smp.metrics.get_stats(predicted, labels, mode="multiclass", num_classes=2)
+        iou_score = smp.metrics.iou_score(tp, fp, fn, tn)
+
+        miou = iou_score.mean().item()
 
     return miou
 
