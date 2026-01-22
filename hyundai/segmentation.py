@@ -11,7 +11,18 @@ from nas.train_samplenet import train_samplenet
 def search_architecture(args, dataset):
     device = set_device(args.gpu_idx)
 
-    model = SuperNet(n_class=2)
+    # Create SuperNet with specified search space
+    search_space = getattr(args, 'search_space', 'basic')
+    model = SuperNet(n_class=2, search_space=search_space)
+    print(f"Search space: {search_space}")
+    if search_space == 'extended':
+        print("  - 5 operations (Conv3x3, Conv5x5, Conv7x7, DWSep3x3, DWSep5x5)")
+        print("  - 3 width multipliers (0.5x, 0.75x, 1.0x)")
+        print("  - Total: 5^5 x 3^5 = 759,375 architectures")
+    else:
+        print("  - 5 operations (Conv3x3, Conv5x5, Conv7x7, DWSep3x3, DWSep5x5)")
+        print("  - Total: 5^5 = 3,125 architectures")
+
     model = model.to(device)
     use_dp = torch.cuda.is_available() and len(args.gpu_idx) >= 2
     if use_dp:
@@ -25,8 +36,9 @@ def search_architecture(args, dataset):
 
     loss = nn.CrossEntropyLoss()
 
+    # Get alpha parameters (handles both basic and extended search spaces)
     alphas_params = [
-        param for name, param in model.named_parameters() if "alphas" in name
+        param for name, param in model.named_parameters() if "alpha" in name.lower()
     ]
     weight_params = [
         param
@@ -39,7 +51,7 @@ def search_architecture(args, dataset):
 
     data_name = args.data if isinstance(args.data, str) else "_".join(args.data)
     timestamp = str(datetime.now().date()) + "_" + datetime.now().strftime("%H_%M_%S")
-    args.save_dir = f"./hyundai/checkpoints/{args.mode}_{data_name}_seed{args.seed}_lambda{args.flops_lambda}/{timestamp}/"
+    args.save_dir = f"./hyundai/checkpoints/{args.mode}_{data_name}_seed{args.seed}_lambda{args.flops_lambda}_{search_space}/{timestamp}/"
 
     train_architecture(
         args,

@@ -44,6 +44,9 @@ def get_args():
                         help='Learning rate for optimzied network (default: 5e-4)')
     parser.add_argument('--flops_lambda', type=float, default=0.0,
                         help='FLOPs penalty weight for multi-objective NAS (default: 0.0, no penalty)')
+    parser.add_argument('--search_space', type=str, default='basic',
+                        choices=['basic', 'extended'],
+                        help='Search space type: basic (5 ops, 3125 archs) or extended (5 ops x 3 widths, 759375 archs)')
     parser.add_argument('--comparison', action='store_true',
                         help='Run comparison with baseline models (AutoPatch, RealtimeSeg style)')
     parser.add_argument('--baseline_models', type=str, nargs='+',

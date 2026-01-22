@@ -3,11 +3,12 @@ import torch
 from torch import nn
 from torchvision.models import DenseNet121_Weights, densenet121
 
-from utils.operations import MixedOp
+from utils.operations import MixedOp, MixedOpWithWidth, DepthwiseSeparableConvTranspose2d
 
 ranges = {
     "densenet": ((0, 3), (4, 6), (6, 8), (8, 10), (10, 12)),
 }
+
 
 class DenseNet(nn.Module):
     def __init__(self):
@@ -27,15 +28,36 @@ class DenseNet(nn.Module):
 
 
 class SuperNet(nn.Module):
-    def __init__(self, n_class):
+    """
+    SuperNet with configurable search space.
+
+    Args:
+        n_class: number of output classes
+        search_space: 'basic' (5 ops) or 'extended' (5 ops x 3 widths = 15 choices)
+    """
+    def __init__(self, n_class, search_space='basic'):
         super().__init__()
         self.n_class = n_class
+        self.search_space = search_space
         self.pretrained_net = DenseNet()
-        self.deconv1 = MixedOp(1024, 512)
-        self.deconv2 = MixedOp(512, 256)
-        self.deconv3 = MixedOp(256, 128)
-        self.deconv4 = MixedOp(128, 64)
-        self.deconv5 = MixedOp(64, 32)
+
+        if search_space == 'extended':
+            # Extended search space with width multiplier
+            # Total: 5^5 x 3^5 = 759,375 architectures
+            self.deconv1 = MixedOpWithWidth(1024, 512)
+            self.deconv2 = MixedOpWithWidth(512, 256)
+            self.deconv3 = MixedOpWithWidth(256, 128)
+            self.deconv4 = MixedOpWithWidth(128, 64)
+            self.deconv5 = MixedOpWithWidth(64, 32)
+        else:
+            # Basic search space (5 operations only)
+            # Total: 5^5 = 3,125 architectures
+            self.deconv1 = MixedOp(1024, 512)
+            self.deconv2 = MixedOp(512, 256)
+            self.deconv3 = MixedOp(256, 128)
+            self.deconv4 = MixedOp(128, 64)
+            self.deconv5 = MixedOp(64, 32)
+
         self.classifier = nn.Conv2d(32, n_class, kernel_size=1)
 
     def forward(self, x):
@@ -68,15 +90,48 @@ class SuperNet(nn.Module):
         self.deconv5.clip_alphas()
 
     def get_alphas(self):
-        # return by list
-        alpha_list = [
-            self.deconv1.alphas.cpu().detach().numpy().tolist(),
-            self.deconv2.alphas.cpu().detach().numpy().tolist(),
-            self.deconv3.alphas.cpu().detach().numpy().tolist(),
-            self.deconv4.alphas.cpu().detach().numpy().tolist(),
-            self.deconv5.alphas.cpu().detach().numpy().tolist(),
-        ]
-        return alpha_list
+        """Return alpha values for logging"""
+        if self.search_space == 'extended':
+            alpha_list = []
+            for deconv in [self.deconv1, self.deconv2, self.deconv3, self.deconv4, self.deconv5]:
+                alpha_list.append({
+                    'op': deconv.alphas_op.cpu().detach().numpy().tolist(),
+                    'width': deconv.alphas_width.cpu().detach().numpy().tolist()
+                })
+            return alpha_list
+        else:
+            alpha_list = [
+                self.deconv1.alphas.cpu().detach().numpy().tolist(),
+                self.deconv2.alphas.cpu().detach().numpy().tolist(),
+                self.deconv3.alphas.cpu().detach().numpy().tolist(),
+                self.deconv4.alphas.cpu().detach().numpy().tolist(),
+                self.deconv5.alphas.cpu().detach().numpy().tolist(),
+            ]
+            return alpha_list
+
+    def get_alpha_params(self):
+        """Return all alpha parameters for optimizer"""
+        if self.search_space == 'extended':
+            params = []
+            for deconv in [self.deconv1, self.deconv2, self.deconv3, self.deconv4, self.deconv5]:
+                params.append(deconv.alphas_op)
+                params.append(deconv.alphas_width)
+            return params
+        else:
+            return [
+                self.deconv1.alphas,
+                self.deconv2.alphas,
+                self.deconv3.alphas,
+                self.deconv4.alphas,
+                self.deconv5.alphas,
+            ]
+
+    def get_arch_description(self):
+        """Return human-readable architecture description"""
+        desc = []
+        for i, deconv in enumerate([self.deconv1, self.deconv2, self.deconv3, self.deconv4, self.deconv5], 1):
+            desc.append(f"deconv{i}: {deconv.get_op_name()}")
+        return desc
 
     def get_expected_flops(self, input_size=128):
         """
@@ -104,6 +159,7 @@ class SuperNet(nn.Module):
 
 
 class OptimizedNetwork(nn.Module):
+    """Extract the final architecture from SuperNet based on max alpha selection"""
     def __init__(self, super_net):
         super(OptimizedNetwork, self).__init__()
 
@@ -112,35 +168,95 @@ class OptimizedNetwork(nn.Module):
         else:
             module = super_net
 
-        # Use deepcopy to create independent copies that can be properly moved to device
+        self.search_space = getattr(module, 'search_space', 'basic')
         self.pretrained_net = copy.deepcopy(module.pretrained_net)
 
-        self.deconv1 = copy.deepcopy(module.deconv1.get_max_op())
-        self.deconv2 = copy.deepcopy(module.deconv2.get_max_op())
-        self.deconv3 = copy.deepcopy(module.deconv3.get_max_op())
-        self.deconv4 = copy.deepcopy(module.deconv4.get_max_op())
-        self.deconv5 = copy.deepcopy(module.deconv5.get_max_op())
+        if self.search_space == 'extended':
+            # For extended search space, we need to extract op + bn + optional projection
+            self._setup_extended_deconv(module)
+        else:
+            # For basic search space
+            self.deconv1 = copy.deepcopy(module.deconv1.get_max_op())
+            self.bn1 = copy.deepcopy(module.deconv1.bn)
+            self.deconv2 = copy.deepcopy(module.deconv2.get_max_op())
+            self.bn2 = copy.deepcopy(module.deconv2.bn)
+            self.deconv3 = copy.deepcopy(module.deconv3.get_max_op())
+            self.bn3 = copy.deepcopy(module.deconv3.bn)
+            self.deconv4 = copy.deepcopy(module.deconv4.get_max_op())
+            self.bn4 = copy.deepcopy(module.deconv4.bn)
+            self.deconv5 = copy.deepcopy(module.deconv5.get_max_op())
+            self.bn5 = copy.deepcopy(module.deconv5.bn)
+
+            self.proj1 = None
+            self.proj2 = None
+            self.proj3 = None
+            self.proj4 = None
+            self.proj5 = None
 
         self.classifier = copy.deepcopy(module.classifier)
+        self.relu = nn.ReLU(inplace=True)
+
+    def _setup_extended_deconv(self, module):
+        """Setup deconv layers for extended search space"""
+        for i, deconv in enumerate([module.deconv1, module.deconv2,
+                                    module.deconv3, module.deconv4, module.deconv5], 1):
+            op = copy.deepcopy(deconv.get_max_op())
+            bn = copy.deepcopy(deconv.get_max_bn())
+            proj = deconv.get_max_proj()
+            if proj is not None:
+                proj = copy.deepcopy(proj)
+
+            setattr(self, f'deconv{i}', op)
+            setattr(self, f'bn{i}', bn)
+            setattr(self, f'proj{i}', proj)
 
     def forward(self, x):
         output = self.pretrained_net(x)
 
-        x5 = output["x5"]  # size=(N, 512, x.H/32, x.W/32)
-        x4 = output["x4"]  # size=(N, 512, x.H/16, x.W/16)
-        x3 = output["x3"]  # size=(N, 256, x.H/8,  x.W/8)
-        x2 = output["x2"]  # size=(N, 128, x.H/4,  x.W/4)
-        x1 = output["x1"]  # size=(N, 64, x.H/2,  x.W/2)
+        x5 = output["x5"]
+        x4 = output["x4"]
+        x3 = output["x3"]
+        x2 = output["x2"]
+        x1 = output["x1"]
 
-        score = self.deconv1(x5)  # size=(N, 512, x.H/16, x.W/16)
-        score = score + x4  # element-wise add, size=(N, 512, x.H/16, x.W/16)
-        score = self.deconv2(score)  # size=(N, 256, x.H/8, x.W/8)
-        score = score + x3  # element-wise add, size=(N, 256, x.H/8, x.W/8)
-        score = self.deconv3(score)  # size=(N, 128, x.H/4, x.W/4)
-        score = score + x2  # element-wise add, size=(N, 128, x.H/4, x.W/4)
-        score = self.deconv4(score)  # size=(N, 64, x.H/2, x.W/2)
-        score = score + x1  # element-wise add, size=(N, 64, x.H/2, x.W/2)
-        score = self.deconv5(score)  # size=(N, 32, x.H, x.W)
-        score = self.classifier(score)  # size=(N, n_class, x.H/1, x.W/1)
+        # deconv1
+        score = self.deconv1(x5)
+        score = self.relu(score)
+        score = self.bn1(score)
+        if self.proj1 is not None:
+            score = self.proj1(score)
+        score = score + x4
 
-        return score  # size=(N, n_class, x.H/1, x.W/1)
+        # deconv2
+        score = self.deconv2(score)
+        score = self.relu(score)
+        score = self.bn2(score)
+        if self.proj2 is not None:
+            score = self.proj2(score)
+        score = score + x3
+
+        # deconv3
+        score = self.deconv3(score)
+        score = self.relu(score)
+        score = self.bn3(score)
+        if self.proj3 is not None:
+            score = self.proj3(score)
+        score = score + x2
+
+        # deconv4
+        score = self.deconv4(score)
+        score = self.relu(score)
+        score = self.bn4(score)
+        if self.proj4 is not None:
+            score = self.proj4(score)
+        score = score + x1
+
+        # deconv5
+        score = self.deconv5(score)
+        score = self.relu(score)
+        score = self.bn5(score)
+        if self.proj5 is not None:
+            score = self.proj5(score)
+
+        score = self.classifier(score)
+        return score

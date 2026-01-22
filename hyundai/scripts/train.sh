@@ -1,7 +1,7 @@
 # Set Experiment Settings
 # Seed Stability Analysis: 5 seeds commonly used for reproducibility verification
 # SEEDS=(0 1 2 42 123)
-SEEDS=(1 2 123)
+SEEDS=(1 2)
 MODE='nas'
 DATA='all'
 GPU='0 1'
@@ -22,11 +22,17 @@ W_EPOCHS=2
 EPOCHS=10
 
 # Multi-objective NAS Settings
-FLOPS_LAMBDA=0.0  # Set > 0 for FLOPs-aware search (e.g., 0.1, 0.3, 0.5)
+FLOPS_LAMBDA=0.1  # Set > 0 for FLOPs-aware search (e.g., 0.1, 0.3, 0.5)
+
+# Search Space Settings
+# 'basic': 5 ops (Conv3x3, Conv5x5, Conv7x7, DWSep3x3, DWSep5x5) = 3,125 architectures
+# 'extended': 5 ops x 3 widths (0.5x, 0.75x, 1.0x) = 759,375 architectures
+SEARCH_SPACE='extended'  # Use 'extended' for clear Pareto front
 
 # Lambda Ablation Study Settings
 ABLATION=false  # Set to true to run λ ablation study
-LAMBDA_VALUES=(0.0 0.01 0.05 0.1 0.5 1.0)  # λ values for Pareto front
+# LAMBDA_VALUES=(0.0 0.01 0.05 0.1 0.5 1.0)  # λ values for Pareto front
+LAMBDA_VALUES=(0.0 0.1 0.5 1.0)  # λ values for Pareto front
 
 # Comparison Settings (AutoPatch, RealtimeSeg style baselines)
 COMPARISON=false  # Set to true to run baseline comparisons
@@ -48,7 +54,7 @@ run_experiment() {
     local LAMBDA=$2
 
     echo "========================================"
-    echo "Running experiment: seed=$SEED, λ=$LAMBDA"
+    echo "Running experiment: seed=$SEED, λ=$LAMBDA, search_space=$SEARCH_SPACE"
     echo "========================================"
     $PYTHON hyundai/main.py \
         --seed $SEED \
@@ -68,6 +74,7 @@ run_experiment() {
         --clip_grad $CLIP \
         --opt_lr $OPT_LR \
         --flops_lambda $LAMBDA \
+        --search_space $SEARCH_SPACE \
         $COMPARISON_ARGS
 }
 
