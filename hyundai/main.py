@@ -18,10 +18,11 @@ def main():
 
     data_name = args.data if isinstance(args.data, str) else "_".join(args.data)
     timestamp = str(datetime.now().date()) + "_" + datetime.now().strftime("%H_%M_%S")
-    args.log_dir = f"./hyundai/logs/{args.mode}_{data_name}_seed{args.seed}_lambda{args.flops_lambda}/{timestamp}/"
+    search_space = getattr(args, 'search_space', 'basic')
+    args.log_dir = f"./hyundai/logs/{args.mode}_{data_name}_seed{args.seed}_lambda{args.flops_lambda}_{search_space}/{timestamp}/"
 
-    # Include λ in run name for ablation study identification
-    run_name = f"hyundai_seed{args.seed}_λ{args.flops_lambda}"
+    # Include λ and search_space in run name for ablation study identification
+    run_name = f"hyundai_seed{args.seed}_λ{args.flops_lambda}_{search_space}"
     wandb.init(config=args, project="Seg-NAS", entity="hopo55", name=run_name)
     
     # Data Preprocessing
