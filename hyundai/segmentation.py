@@ -67,6 +67,41 @@ def search_architecture(args, dataset):
 def train_searched_model(args, opt_model, dataset):
     device = set_device(args.gpu_idx)
 
+    # Extract architecture description before creating OptimizedNetwork
+    if isinstance(opt_model, torch.nn.DataParallel):
+        supernet = opt_model.module
+    else:
+        supernet = opt_model
+
+    # Log final selected architecture
+    arch_desc = supernet.get_arch_description()
+    print("\n" + "=" * 60)
+    print("Final Selected Architecture:")
+    print("=" * 60)
+    for layer_desc in arch_desc:
+        print(f"  {layer_desc}")
+    print("=" * 60 + "\n")
+
+    # Log to wandb as a summary (appears in Overview tab)
+    arch_text = "\n".join(arch_desc)
+    wandb.run.summary['Selected Architecture'] = arch_text
+
+    # Also log as individual metrics for easier filtering
+    for i, layer_desc in enumerate(arch_desc, 1):
+        wandb.run.summary[f'Architecture/Layer{i}'] = layer_desc
+
+    # Log alpha values for detailed analysis
+    alphas = supernet.get_alphas()
+    if supernet.search_space == 'extended':
+        for i, alpha_dict in enumerate(alphas, 1):
+            wandb.log({
+                f'Final_Alphas/deconv{i}_op': alpha_dict['op'],
+                f'Final_Alphas/deconv{i}_width': alpha_dict['width']
+            })
+    else:
+        for i, alpha_list in enumerate(alphas, 1):
+            wandb.log({f'Final_Alphas/deconv{i}': alpha_list})
+
     opt_model = OptimizedNetwork(opt_model)
     opt_model = opt_model.to(device)
     use_dp = torch.cuda.is_available() and len(args.gpu_idx) >= 2
@@ -86,6 +121,8 @@ def train_searched_model(args, opt_model, dataset):
         'Model/FLOPs (GFLOPs)': gflops,
         'Model/Parameters (M)': params_m
     })
+    wandb.run.summary['Model/Final FLOPs (GFLOPs)'] = gflops
+    wandb.run.summary['Model/Final Parameters (M)'] = params_m
 
     loss = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(opt_model.parameters(), lr=args.opt_lr)

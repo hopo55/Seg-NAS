@@ -1,7 +1,7 @@
 # Set Experiment Settings
 # Seed Stability Analysis: 5 seeds commonly used for reproducibility verification
-# SEEDS=(0 1 2 42 123)
-SEEDS=(1 2)
+#SEEDS=(0 1 2 42 123)
+SEEDS=(0)
 MODE='nas'
 DATA='all'
 GPU='0 1'
@@ -12,27 +12,27 @@ RESIZE=128
 TEST_RATIO=0.2
 
 # Set Train and Test Settings
-BATCH_SIZE=128
+BATCH_SIZE=64
 ALPHA=0.001
 W_LR=0.001
 OPT_LR=0.001
 W_DECAY=2e-4
 CLIP=5.0
-W_EPOCHS=2
-EPOCHS=10
-
-# Multi-objective NAS Settings
-FLOPS_LAMBDA=0.1  # Set > 0 for FLOPs-aware search (e.g., 0.1, 0.3, 0.5)
+W_EPOCHS=1
+EPOCHS=2
 
 # Search Space Settings
 # 'basic': 5 ops (Conv3x3, Conv5x5, Conv7x7, DWSep3x3, DWSep5x5) = 3,125 architectures
 # 'extended': 5 ops x 3 widths (0.5x, 0.75x, 1.0x) = 759,375 architectures
 SEARCH_SPACE='extended'  # Use 'extended' for clear Pareto front
 
+# Multi-objective NAS Settings
+FLOPS_LAMBDA=0.1  # Set > 0 for FLOPs-aware search (e.g., 0.1, 0.3, 0.5)
+
 # Lambda Ablation Study Settings
-ABLATION=false  # Set to true to run λ ablation study
-# LAMBDA_VALUES=(0.0 0.01 0.05 0.1 0.5 1.0)  # λ values for Pareto front
-LAMBDA_VALUES=(0.0 0.1 0.5 1.0)  # λ values for Pareto front
+ABLATION=true  # Set to true to run λ ablation study
+LAMBDA_VALUES=(0.0 0.01 0.05 0.1 0.5 1.0)  # λ values for Pareto front
+# LAMBDA_VALUES=(0.0 0.1 0.5 1.0)  # λ values for Pareto front
 
 # Comparison Settings (AutoPatch, RealtimeSeg style baselines)
 COMPARISON=false  # Set to true to run baseline comparisons

@@ -194,6 +194,30 @@ def train_architecture(
             os.makedirs(args.save_dir, exist_ok=True)
             torch.save(model.state_dict(), save_path)  # Save the model
 
+        # Log alpha values during training for visualization
+        if isinstance(model, torch.nn.DataParallel):
+            alphas = model.module.get_alphas()
+            search_space = model.module.search_space
+        else:
+            alphas = model.get_alphas()
+            search_space = model.search_space
+
+        alpha_log = {}
+        if search_space == 'extended':
+            # For extended search space, log operation and width alphas separately
+            for i, alpha_dict in enumerate(alphas, 1):
+                # Log operation alphas
+                for j, val in enumerate(alpha_dict['op']):
+                    alpha_log[f'Alphas/deconv{i}_op{j}'] = val
+                # Log width alphas
+                for j, val in enumerate(alpha_dict['width']):
+                    alpha_log[f'Alphas/deconv{i}_width{j}'] = val
+        else:
+            # For basic search space
+            for i, alpha_list in enumerate(alphas, 1):
+                for j, val in enumerate(alpha_list):
+                    alpha_log[f'Alphas/deconv{i}_op{j}'] = val
+
         wandb.log({
             'Architecture Train/Weight_Loss': train_w_loss,
             'Architecture Train/Alpha_Loss': train_a_loss,
@@ -201,7 +225,8 @@ def train_architecture(
             'Architecture Train/Alpha_mIoU': train_a_iou,
             'Architecture Train/Expected_FLOPs (GFLOPs)': train_a_flops,
             'Architecture Test/Test_mIoU': test_iou,
-            'epoch': epoch
+            'epoch': epoch,
+            **alpha_log
         })
 
         print(
