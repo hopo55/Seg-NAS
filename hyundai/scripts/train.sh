@@ -27,10 +27,10 @@ EPOCHS=2
 SEARCH_SPACE='extended'  # Use 'extended' for clear Pareto front
 
 # Multi-objective NAS Settings
-FLOPS_LAMBDA=0.1  # Set > 0 for FLOPs-aware search (e.g., 0.1, 0.3, 0.5)
+FLOPS_LAMBDA=0.5  # Set > 0 for FLOPs-aware search (e.g., 0.1, 0.3, 0.5)
 
 # Lambda Ablation Study Settings
-ABLATION=true  # Set to true to run λ ablation study
+ABLATION=false  # Set to true to run λ ablation study
 LAMBDA_VALUES=(0.0 0.01 0.05 0.1 0.5 1.0)  # λ values for Pareto front
 # LAMBDA_VALUES=(0.0 0.1 0.5 1.0)  # λ values for Pareto front
 
