@@ -78,13 +78,31 @@ def train_weight_alpha(
         outputs = model(data)
         ce_loss = loss(outputs, labels)
 
-        # Multi-objective: Add FLOPs penalty
+        # Multi-objective: Add FLOPs penalty (target-based)
         if isinstance(model, torch.nn.DataParallel):
             expected_flops = model.module.get_expected_flops(args.resize)
         else:
             expected_flops = model.get_expected_flops(args.resize)
 
-        flops_penalty = args.flops_lambda * expected_flops
+        # Target-based FLOPs loss: |expected - target| / norm_base
+        # This encourages architecture to match target FLOPs, not just minimize
+        target_flops = getattr(args, "target_flops", None)
+        flops_norm_base = getattr(args, "flops_norm_base", None)
+
+        if target_flops is not None and target_flops > 0:
+            # Target-based loss: penalize deviation from target
+            flops_diff = torch.abs(expected_flops - target_flops)
+            if flops_norm_base is not None and flops_norm_base > 0:
+                flops_penalty = args.flops_lambda * (flops_diff / flops_norm_base)
+            else:
+                flops_penalty = args.flops_lambda * flops_diff
+        else:
+            # Fallback: simple penalty (minimize FLOPs)
+            if flops_norm_base is not None and flops_norm_base > 0:
+                flops_penalty = args.flops_lambda * (expected_flops / flops_norm_base)
+            else:
+                flops_penalty = args.flops_lambda * expected_flops
+
         total_loss = ce_loss + flops_penalty
 
         train_a_loss.update(ce_loss.item(), batch_size)
@@ -143,6 +161,16 @@ def train_architecture(
 
     best_test_iou = -float('inf')
 
+    # Initialize FLOPs normalization base once (using initial alphas)
+    if getattr(args, "flops_norm_base", None) is None:
+        with torch.no_grad():
+            if isinstance(model, torch.nn.DataParallel):
+                base_flops = model.module.get_expected_flops(args.resize)
+            else:
+                base_flops = model.get_expected_flops(args.resize)
+        args.flops_norm_base = float(base_flops.detach().cpu().item())
+        print(f"FLOPs normalization base: {args.flops_norm_base:.6f} GFLOPs")
+
     # Track GPU hours for each phase
     warmup_start_time = time.time()
 
@@ -171,7 +199,11 @@ def train_architecture(
 
     print("Supernet training has started...")
     if args.flops_lambda > 0:
-        print(f"Multi-objective NAS enabled with flops_lambda={args.flops_lambda}")
+        target_flops = getattr(args, "target_flops", None)
+        if target_flops is not None and target_flops > 0:
+            print(f"Target-based NAS enabled: target_flops={target_flops} GFLOPs, lambda={args.flops_lambda}")
+        else:
+            print(f"Multi-objective NAS enabled with flops_lambda={args.flops_lambda}")
 
     for epoch in range(args.warmup_epochs, args.epochs):
         train_w_loss, train_w_iou, train_a_loss, train_a_iou, train_a_flops = (

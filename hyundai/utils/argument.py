@@ -42,8 +42,13 @@ def get_args():
                         help='Maximum gradient clipping value (default: 5.0)')
     parser.add_argument('--opt_lr', type=float, default=5e-4,
                         help='Learning rate for optimzied network (default: 5e-4)')
-    parser.add_argument('--flops_lambda', type=float, default=0.0,
-                        help='FLOPs penalty weight for multi-objective NAS (default: 0.0, no penalty)')
+    parser.add_argument('--flops_lambda', type=float, default=1.0,
+                        help='FLOPs penalty weight for multi-objective NAS (default: 1.0)')
+    parser.add_argument('--target_flops', type=float, default=None,
+                        help='Target FLOPs (GFLOPs) for architecture search. If set, loss = |expected - target|. '
+                             'If None, uses simple penalty: loss = expected_flops.')
+    parser.add_argument('--flops_norm_base', type=float, default=None,
+                        help='Normalize expected FLOPs by this base (GFLOPs). If None, use initial expected FLOPs.')
     parser.add_argument('--search_space', type=str, default='basic',
                         choices=['basic', 'extended'],
                         help='Search space type: basic (5 ops, 3125 archs) or extended (5 ops x 3 widths, 759375 archs)')
@@ -75,4 +80,3 @@ def get_args():
 def hotstamping_args(parser):
     parser.add_argument('--model_dir', type=str, required=False,
                         help='Path to the best_model.pt file')
-

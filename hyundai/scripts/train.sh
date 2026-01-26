@@ -4,7 +4,7 @@
 SEEDS=(0)
 MODE='nas'
 DATA='all'
-GPU='0 1'
+GPU='0'
 
 # Set Data Settings
 DATA_DIR='./dataset/image'
@@ -12,14 +12,14 @@ RESIZE=128
 TEST_RATIO=0.2
 
 # Set Train and Test Settings
-BATCH_SIZE=64
-ALPHA=0.01
-W_LR=0.01
-OPT_LR=0.01
+BATCH_SIZE=128
+ALPHA=0.001
+W_LR=0.001
+OPT_LR=0.001
 W_DECAY=2e-4
 CLIP=5.0
-W_EPOCHS=5
-EPOCHS=20
+W_EPOCHS=1
+EPOCHS=2
 
 # Search Space Settings
 # 'basic': 5 ops (Conv3x3, Conv5x5, Conv7x7, DWSep3x3, DWSep5x5) = 3,125 architectures
@@ -27,12 +27,15 @@ EPOCHS=20
 SEARCH_SPACE='extended'  # Use 'extended' for clear Pareto front
 
 # Multi-objective NAS Settings
-FLOPS_LAMBDA=0.0  # Set > 0 for FLOPs-aware search (e.g., 0.1, 0.3, 0.5)
+FLOPS_LAMBDA=1.0  # FLOPs penalty weight (default: 1.0)
+FLOPS_NORM_BASE=10.0  # Normalization base (GFLOPs) for stable training
 
-# Lambda Ablation Study Settings
-# ABLATION=false  # Set to true to run λ ablation study
-ABLATION=true  # Set to true to run λ ablation study
-LAMBDA_VALUES=(0.0 0.01 0.05 0.1 0.5 1.0)  # λ values for Pareto front
+# Target FLOPs Ablation Study Settings
+# ABLATION=false  # Set to true to run target FLOPs ablation study
+ABLATION=true  # Set to true to run target FLOPs ablation study
+# Target FLOPs values (GFLOPs) for Pareto front - adjust based on your model's FLOPs range
+# Small target → smaller kernels/channels, Large target → larger kernels/channels
+TARGET_FLOPS_VALUES=(5.0 10.0 15.0 20.0)  # Target FLOPs for Pareto front
 
 # Comparison Settings (AutoPatch, RealtimeSeg style baselines)
 COMPARISON=false  # Set to true to run baseline comparisons
@@ -48,13 +51,25 @@ if [ "$COMPARISON" = true ]; then
     echo "Baseline comparison enabled: $BASELINE_MODELS"
 fi
 
+# Build FLOPs normalization argument (only when > 0)
+FLOPS_NORM_ARGS=""
+if (( $(echo "$FLOPS_NORM_BASE > 0" | bc -l) )); then
+    FLOPS_NORM_ARGS="--flops_norm_base $FLOPS_NORM_BASE"
+fi
+
 # Function to run a single experiment
 run_experiment() {
     local SEED=$1
-    local LAMBDA=$2
+    local TARGET=$2
+
+    # Build target FLOPs argument
+    local TARGET_ARGS=""
+    if (( $(echo "$TARGET > 0" | bc -l) )); then
+        TARGET_ARGS="--target_flops $TARGET"
+    fi
 
     echo "========================================"
-    echo "Running experiment: seed=$SEED, λ=$LAMBDA, search_space=$SEARCH_SPACE"
+    echo "Running experiment: seed=$SEED, target_flops=$TARGET GFLOPs, search_space=$SEARCH_SPACE"
     echo "========================================"
     $PYTHON hyundai/main.py \
         --seed $SEED \
@@ -73,36 +88,38 @@ run_experiment() {
         --epochs $EPOCHS \
         --clip_grad $CLIP \
         --opt_lr $OPT_LR \
-        --flops_lambda $LAMBDA \
+        --flops_lambda $FLOPS_LAMBDA \
         --search_space $SEARCH_SPACE \
+        $TARGET_ARGS \
+        $FLOPS_NORM_ARGS \
         $COMPARISON_ARGS
 }
 
 # Run experiments based on mode
 if [ "$ABLATION" = true ]; then
     echo "=========================================="
-    echo "Starting λ Ablation Study"
-    echo "λ values: ${LAMBDA_VALUES[*]}"
+    echo "Starting Target FLOPs Ablation Study"
+    echo "Target FLOPs values: ${TARGET_FLOPS_VALUES[*]} GFLOPs"
     echo "Seeds: ${SEEDS[*]}"
     echo "=========================================="
 
-    for LAMBDA in "${LAMBDA_VALUES[@]}"; do
+    for TARGET in "${TARGET_FLOPS_VALUES[@]}"; do
         for SEED in "${SEEDS[@]}"; do
-            run_experiment $SEED $LAMBDA
+            run_experiment $SEED $TARGET
         done
     done
 
     echo "=========================================="
-    echo "λ Ablation Study completed!"
+    echo "Target FLOPs Ablation Study completed!"
     echo "=========================================="
 else
     echo "=========================================="
-    echo "Starting Seed Stability Analysis"
+    echo "Starting Seed Stability Analysis (no target FLOPs)"
     echo "Seeds: ${SEEDS[*]}"
     echo "=========================================="
 
     for SEED in "${SEEDS[@]}"; do
-        run_experiment $SEED $FLOPS_LAMBDA
+        run_experiment $SEED 0.0
     done
 
     echo "=========================================="

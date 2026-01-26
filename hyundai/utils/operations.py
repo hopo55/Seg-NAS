@@ -97,22 +97,18 @@ class MixedOp(nn.Module):
         self.bn = nn.BatchNorm2d(C_out)
         self.relu = nn.ReLU(inplace=True)
 
-        # 5 operations -> 5 alphas
+        # 5 operations -> 5 alphas (random init for better gradient signal)
         self.alphas = nn.Parameter(
-            torch.tensor([0.2, 0.2, 0.2, 0.2, 0.2], dtype=torch.float32), requires_grad=True
+            torch.randn(5) * 0.1 + 0.2, requires_grad=True
         )
 
         self._C_in = C_in
         self._C_out = C_out
 
     def clip_alphas(self):
+        """Clip alphas to valid range. L1 normalization removed to preserve gradient signal."""
         with torch.no_grad():
-            self.alphas.clamp_(0, 1)
-            alpha_sum = self.alphas.sum()
-            if alpha_sum.item() <= 1e-12:
-                self.alphas.fill_(1.0 / self.alphas.numel())
-            else:
-                self.alphas.div_(alpha_sum)
+            self.alphas.clamp_(0.01, 1)  # min 0.01 to prevent vanishing
 
     def _normalized_alphas(self):
         return torch.softmax(self.alphas, dim=0)
@@ -223,31 +219,22 @@ class MixedOpWithWidth(nn.Module):
 
         self.relu = nn.ReLU(inplace=True)
 
-        # Alpha for operation selection (5 ops)
+        # Alpha for operation selection (5 ops) - random init for better gradient signal
         num_ops = 5
         self.alphas_op = nn.Parameter(
-            torch.full((num_ops,), 1.0 / num_ops, dtype=torch.float32), requires_grad=True
+            torch.randn(num_ops) * 0.1 + 1.0 / num_ops, requires_grad=True
         )
-        # Alpha for width selection (3 widths)
+        # Alpha for width selection (3 widths) - random init for better gradient signal
         num_widths = len(width_mults)
         self.alphas_width = nn.Parameter(
-            torch.full((num_widths,), 1.0 / num_widths, dtype=torch.float32), requires_grad=True
+            torch.randn(num_widths) * 0.1 + 1.0 / num_widths, requires_grad=True
         )
 
     def clip_alphas(self):
+        """Clip alphas to valid range. L1 normalization removed to preserve gradient signal."""
         with torch.no_grad():
-            self.alphas_op.clamp_(0, 1)
-            op_sum = self.alphas_op.sum()
-            if op_sum.item() <= 1e-12:
-                self.alphas_op.fill_(1.0 / self.alphas_op.numel())
-            else:
-                self.alphas_op.div_(op_sum)
-            self.alphas_width.clamp_(0, 1)
-            width_sum = self.alphas_width.sum()
-            if width_sum.item() <= 1e-12:
-                self.alphas_width.fill_(1.0 / self.alphas_width.numel())
-            else:
-                self.alphas_width.div_(width_sum)
+            self.alphas_op.clamp_(0.01, 1)  # min 0.01 to prevent vanishing
+            self.alphas_width.clamp_(0.01, 1)
 
     def _normalized_alphas_op(self):
         return torch.softmax(self.alphas_op, dim=0)
