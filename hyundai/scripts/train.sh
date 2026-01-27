@@ -33,9 +33,10 @@ FLOPS_NORM_BASE=10.0  # Normalization base (GFLOPs) for stable training
 # Target FLOPs Ablation Study Settings
 # ABLATION=false  # Set to true to run target FLOPs ablation study
 ABLATION=true  # Set to true to run target FLOPs ablation study
-# Target FLOPs values (GFLOPs) for Pareto front - adjust based on your model's FLOPs range
-# Small target → smaller kernels/channels, Large target → larger kernels/channels
-TARGET_FLOPS_VALUES=(5.0 10.0 15.0 20.0)  # Target FLOPs for Pareto front
+# Target FLOPs values (GFLOPs) for Pareto front
+# Decoder FLOPs range: ~1.5 GFLOPs (DWSep3x3) ~ ~8.2 GFLOPs (Conv7x7)
+# Small target → smaller kernels (3x3, DWSep), Large target → larger kernels (5x5, 7x7)
+TARGET_FLOPS_VALUES=(1.0 4.0 7.0 10.0)  # Target FLOPs for Pareto front
 
 # Comparison Settings (AutoPatch, RealtimeSeg style baselines)
 COMPARISON=false  # Set to true to run baseline comparisons
