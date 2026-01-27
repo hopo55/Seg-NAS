@@ -113,6 +113,10 @@ class MixedOp(nn.Module):
     def _normalized_alphas(self):
         return torch.softmax(self.alphas, dim=0)
 
+    def _gumbel_softmax(self, temperature=1.0, hard=True):
+        """Gumbel-Softmax for differentiable discrete sampling"""
+        return torch.nn.functional.gumbel_softmax(self.alphas, tau=temperature, hard=hard)
+
     def forward(self, x):
         weights = self._normalized_alphas()
         x = sum(alpha * op(x) for alpha, op in zip(weights, self._ops))
@@ -133,33 +137,50 @@ class MixedOp(nn.Module):
             idx = self.get_max_alpha_idx()
         return names[idx]
 
-    def get_expected_flops(self, H_out, W_out):
+    def get_sampled_flops(self, H_out, W_out, temperature=1.0):
         """
-        Calculate expected FLOPs based on alpha weights (differentiable).
-        ConvTranspose2d FLOPs: kernel^2 * C_in * C_out * H_out * W_out
-        DepthwiseSeparable FLOPs: kernel^2 * C_in * H_out * W_out + C_in * C_out * H_out * W_out
+        Calculate FLOPs of the sampled operation using Gumbel-Softmax (differentiable).
+        This returns FLOPs closer to the actual selected operation, not weighted average.
         """
         C_in = self._C_in
         C_out = self._C_out
 
         flops_per_op = []
-
         # Conv 3x3
         flops_per_op.append(3 * 3 * C_in * C_out * H_out * W_out)
         # Conv 5x5
         flops_per_op.append(5 * 5 * C_in * C_out * H_out * W_out)
         # Conv 7x7
         flops_per_op.append(7 * 7 * C_in * C_out * H_out * W_out)
-        # DWSep 3x3: depthwise + pointwise
+        # DWSep 3x3
         flops_per_op.append(3 * 3 * C_in * H_out * W_out + C_in * C_out * H_out * W_out)
-        # DWSep 5x5: depthwise + pointwise
+        # DWSep 5x5
         flops_per_op.append(5 * 5 * C_in * H_out * W_out + C_in * C_out * H_out * W_out)
 
         flops_tensor = self.alphas.new_tensor(flops_per_op)
-        weights = self._normalized_alphas()
-        expected_flops = (weights * flops_tensor).sum()
+        # Gumbel-Softmax: hard=True gives one-hot in forward, soft gradient in backward
+        weights = self._gumbel_softmax(temperature=temperature, hard=True)
+        sampled_flops = (weights * flops_tensor).sum()
 
-        return expected_flops
+        return sampled_flops
+
+    def get_argmax_flops(self, H_out, W_out):
+        """
+        Calculate FLOPs of the argmax selected operation (non-differentiable, for logging).
+        """
+        C_in = self._C_in
+        C_out = self._C_out
+
+        flops_per_op = [
+            3 * 3 * C_in * C_out * H_out * W_out,  # Conv 3x3
+            5 * 5 * C_in * C_out * H_out * W_out,  # Conv 5x5
+            7 * 7 * C_in * C_out * H_out * W_out,  # Conv 7x7
+            3 * 3 * C_in * H_out * W_out + C_in * C_out * H_out * W_out,  # DWSep 3x3
+            5 * 5 * C_in * H_out * W_out + C_in * C_out * H_out * W_out,  # DWSep 5x5
+        ]
+
+        idx = self.get_max_alpha_idx()
+        return flops_per_op[idx]
 
 
 class MixedOpWithWidth(nn.Module):
@@ -242,6 +263,14 @@ class MixedOpWithWidth(nn.Module):
     def _normalized_alphas_width(self):
         return torch.softmax(self.alphas_width, dim=0)
 
+    def _gumbel_softmax_op(self, temperature=1.0, hard=True):
+        """Gumbel-Softmax for operation selection"""
+        return torch.nn.functional.gumbel_softmax(self.alphas_op, tau=temperature, hard=hard)
+
+    def _gumbel_softmax_width(self, temperature=1.0, hard=True):
+        """Gumbel-Softmax for width selection"""
+        return torch.nn.functional.gumbel_softmax(self.alphas_width, tau=temperature, hard=hard)
+
     def forward(self, x):
         outputs = []
         op_weights = self._normalized_alphas_op()
@@ -306,17 +335,19 @@ class MixedOpWithWidth(nn.Module):
         wm = self.width_mults[width_idx]
         return f"{op_names[op_idx]}_w{int(wm*100)}"
 
-    def get_expected_flops(self, H_out, W_out):
+    def get_sampled_flops(self, H_out, W_out, temperature=1.0):
         """
-        Calculate expected FLOPs based on alpha weights (differentiable).
-        Considers both operation type and channel width.
+        Calculate FLOPs of the sampled operation using Gumbel-Softmax (differentiable).
+        This returns FLOPs closer to the actual selected operation, not weighted average.
         """
         C_in = self._C_in
         C_out = self._C_out
 
+        # Gumbel-Softmax sampling
+        op_weights = self._gumbel_softmax_op(temperature=temperature, hard=True)
+        width_weights = self._gumbel_softmax_width(temperature=temperature, hard=True)
+
         total_flops = self.alphas_op.new_tensor(0.0)
-        op_weights = self._normalized_alphas_op()
-        width_weights = self._normalized_alphas_width()
 
         for wi, wm in enumerate(self.width_mults):
             C_mid = max(1, int(C_out * wm))
@@ -343,3 +374,29 @@ class MixedOpWithWidth(nn.Module):
             total_flops = total_flops + width_weights[wi] * width_flops
 
         return total_flops
+
+    def get_argmax_flops(self, H_out, W_out):
+        """
+        Calculate FLOPs of the argmax selected operation (non-differentiable, for logging).
+        """
+        C_in = self._C_in
+        C_out = self._C_out
+
+        op_idx, width_idx = self.get_max_alpha_idx()
+        wm = self.width_mults[width_idx]
+        C_mid = max(1, int(C_out * wm))
+
+        flops_per_op = [
+            3 * 3 * C_in * C_mid * H_out * W_out,  # Conv 3x3
+            5 * 5 * C_in * C_mid * H_out * W_out,  # Conv 5x5
+            7 * 7 * C_in * C_mid * H_out * W_out,  # Conv 7x7
+            3 * 3 * C_in * H_out * W_out + C_in * C_mid * H_out * W_out,  # DWSep 3x3
+            5 * 5 * C_in * H_out * W_out + C_in * C_mid * H_out * W_out,  # DWSep 5x5
+        ]
+
+        # Add projection FLOPs if width < 1.0
+        if wm < 1.0:
+            proj_flops = C_mid * C_out * H_out * W_out
+            flops_per_op = [f + proj_flops for f in flops_per_op]
+
+        return flops_per_op[op_idx]

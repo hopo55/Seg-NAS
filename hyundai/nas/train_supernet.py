@@ -78,20 +78,22 @@ def train_weight_alpha(
         outputs = model(data)
         ce_loss = loss(outputs, labels)
 
-        # Multi-objective: Add FLOPs penalty (target-based)
+        # Multi-objective: Add FLOPs penalty using Gumbel-Softmax sampling
+        # This gives FLOPs closer to actual selected operation (not weighted average)
         if isinstance(model, torch.nn.DataParallel):
-            expected_flops = model.module.get_expected_flops(args.resize)
+            sampled_flops = model.module.get_sampled_flops(args.resize)
+            argmax_flops = model.module.get_argmax_flops(args.resize)
         else:
-            expected_flops = model.get_expected_flops(args.resize)
+            sampled_flops = model.get_sampled_flops(args.resize)
+            argmax_flops = model.get_argmax_flops(args.resize)
 
-        # Target-based FLOPs loss: |expected - target| / norm_base
-        # This encourages architecture to match target FLOPs, not just minimize
+        # Target-based FLOPs loss: |sampled - target| / norm_base
         target_flops = getattr(args, "target_flops", None)
         flops_norm_base = getattr(args, "flops_norm_base", None)
 
         if target_flops is not None and target_flops > 0:
             # Target-based loss: penalize deviation from target
-            flops_diff = torch.abs(expected_flops - target_flops)
+            flops_diff = torch.abs(sampled_flops - target_flops)
             if flops_norm_base is not None and flops_norm_base > 0:
                 flops_penalty = args.flops_lambda * (flops_diff / flops_norm_base)
             else:
@@ -99,14 +101,15 @@ def train_weight_alpha(
         else:
             # Fallback: simple penalty (minimize FLOPs)
             if flops_norm_base is not None and flops_norm_base > 0:
-                flops_penalty = args.flops_lambda * (expected_flops / flops_norm_base)
+                flops_penalty = args.flops_lambda * (sampled_flops / flops_norm_base)
             else:
-                flops_penalty = args.flops_lambda * expected_flops
+                flops_penalty = args.flops_lambda * sampled_flops
 
         total_loss = ce_loss + flops_penalty
 
         train_a_loss.update(ce_loss.item(), batch_size)
-        train_a_flops.update(expected_flops.item(), batch_size)
+        # Log argmax FLOPs (actual selected operation's FLOPs)
+        train_a_flops.update(argmax_flops, batch_size)
         train_a_iou.update(get_iou_score(outputs, labels), batch_size)
 
         total_loss.backward()
@@ -161,14 +164,14 @@ def train_architecture(
 
     best_test_iou = -float('inf')
 
-    # Initialize FLOPs normalization base once (using initial alphas)
+    # Initialize FLOPs normalization base once (using argmax FLOPs)
     if getattr(args, "flops_norm_base", None) is None:
         with torch.no_grad():
             if isinstance(model, torch.nn.DataParallel):
-                base_flops = model.module.get_expected_flops(args.resize)
+                base_flops = model.module.get_argmax_flops(args.resize)
             else:
-                base_flops = model.get_expected_flops(args.resize)
-        args.flops_norm_base = float(base_flops.detach().cpu().item())
+                base_flops = model.get_argmax_flops(args.resize)
+        args.flops_norm_base = float(base_flops)
         print(f"FLOPs normalization base: {args.flops_norm_base:.6f} GFLOPs")
 
     # Track GPU hours for each phase
@@ -255,7 +258,7 @@ def train_architecture(
             'Architecture Train/Alpha_Loss': train_a_loss,
             'Architecture Train/Weight_mIoU': train_w_iou,
             'Architecture Train/Alpha_mIoU': train_a_iou,
-            'Architecture Train/Expected_FLOPs (GFLOPs)': train_a_flops,
+            'Architecture Train/Selected_FLOPs (GFLOPs)': train_a_flops,
             'Architecture Test/Test_mIoU': test_iou,
             'epoch': epoch,
             **alpha_log
@@ -264,7 +267,7 @@ def train_architecture(
         print(
             f"Epoch {epoch+1}/{args.epochs}\n"
             f"[Train W] Weight Loss: {train_w_loss:.4f}, Weight mIoU: {train_w_iou:.4f}\n"
-            f"[Train A] Alpha Loss: {train_a_loss:.4f}, Alpha mIoU: {train_a_iou:.4f}, Expected FLOPs: {train_a_flops:.4f} GFLOPs\n"
+            f"[Train A] Alpha Loss: {train_a_loss:.4f}, Alpha mIoU: {train_a_iou:.4f}, Selected FLOPs: {train_a_flops:.4f} GFLOPs\n"
             f"[Test] mIoU: {test_iou:.4f}"
         )
 
