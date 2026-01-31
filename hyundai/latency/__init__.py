@@ -7,6 +7,7 @@ from .hardware_encoder import HardwareEncoder, get_hardware_features
 from .latency_predictor import (
     ArchitectureEncoder,
     CrossHardwareLatencyPredictor,
+    LatencyPredictorTrainer,
     LatencyLUT
 )
 
@@ -17,5 +18,6 @@ __all__ = [
     'get_hardware_features',
     'ArchitectureEncoder',
     'CrossHardwareLatencyPredictor',
+    'LatencyPredictorTrainer',
     'LatencyLUT',
 ]

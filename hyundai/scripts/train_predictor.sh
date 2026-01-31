@@ -18,7 +18,7 @@
 # Settings
 LUT_DIR='./hyundai/latency/luts'
 OUTPUT_PATH='./hyundai/latency/predictor.pt'
-NUM_EPOCHS=100
+NUM_EPOCHS=200
 BATCH_SIZE=64
 LR=0.001
 NUM_SAMPLES=10000  # Samples per hardware for training
@@ -54,7 +54,8 @@ from pathlib import Path
 from latency import (
     CrossHardwareLatencyPredictor,
     LatencyLUT,
-    LatencyPredictorTrainer
+    LatencyPredictorTrainer,
+    HARDWARE_SPECS
 )
 
 # Load all LUTs
@@ -64,6 +65,9 @@ luts = {}
 for lut_file in lut_dir.glob('*.json'):
     lut = LatencyLUT(str(lut_file))
     hw_name = lut.hardware_name
+    if hw_name not in HARDWARE_SPECS:
+        print(f'Skipping LUT (unknown hardware): {hw_name}')
+        continue
     luts[hw_name] = lut
     print(f'Loaded LUT: {hw_name}')
 
