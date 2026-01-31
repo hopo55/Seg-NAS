@@ -1,0 +1,352 @@
+{
+  "hardware": "NVIDIA_GeForce_RTX_3090",
+  "input_size": 128,
+  "warmup": 50,
+  "repeat": 100,
+  "layers": {
+    "layer_0": {
+      "C_in": 1024,
+      "C_out": 512,
+      "H_out": 8,
+      "W_out": 8,
+      "ops": {
+        "Conv3x3_w50": {
+          "mean_ms": 0.1833,
+          "std_ms": 0.0559
+        },
+        "Conv3x3_w75": {
+          "mean_ms": 0.1269,
+          "std_ms": 0.0101
+        },
+        "Conv3x3_w100": {
+          "mean_ms": 0.1151,
+          "std_ms": 0.0042
+        },
+        "Conv5x5_w50": {
+          "mean_ms": 0.1163,
+          "std_ms": 0.0061
+        },
+        "Conv5x5_w75": {
+          "mean_ms": 0.1182,
+          "std_ms": 0.0045
+        },
+        "Conv5x5_w100": {
+          "mean_ms": 0.1305,
+          "std_ms": 0.0045
+        },
+        "Conv7x7_w50": {
+          "mean_ms": 0.1305,
+          "std_ms": 0.004
+        },
+        "Conv7x7_w75": {
+          "mean_ms": 0.1454,
+          "std_ms": 0.0072
+        },
+        "Conv7x7_w100": {
+          "mean_ms": 0.1731,
+          "std_ms": 0.0062
+        },
+        "DWSep3x3_w50": {
+          "mean_ms": 0.1869,
+          "std_ms": 0.0312
+        },
+        "DWSep3x3_w75": {
+          "mean_ms": 0.1925,
+          "std_ms": 0.0362
+        },
+        "DWSep3x3_w100": {
+          "mean_ms": 0.1951,
+          "std_ms": 0.0384
+        },
+        "DWSep5x5_w50": {
+          "mean_ms": 0.1258,
+          "std_ms": 0.0082
+        },
+        "DWSep5x5_w75": {
+          "mean_ms": 0.1229,
+          "std_ms": 0.0053
+        },
+        "DWSep5x5_w100": {
+          "mean_ms": 0.1153,
+          "std_ms": 0.0074
+        }
+      }
+    },
+    "layer_1": {
+      "C_in": 512,
+      "C_out": 256,
+      "H_out": 16,
+      "W_out": 16,
+      "ops": {
+        "Conv3x3_w50": {
+          "mean_ms": 0.1465,
+          "std_ms": 0.0268
+        },
+        "Conv3x3_w75": {
+          "mean_ms": 0.0843,
+          "std_ms": 0.0062
+        },
+        "Conv3x3_w100": {
+          "mean_ms": 0.0798,
+          "std_ms": 0.0048
+        },
+        "Conv5x5_w50": {
+          "mean_ms": 0.0837,
+          "std_ms": 0.0028
+        },
+        "Conv5x5_w75": {
+          "mean_ms": 0.0868,
+          "std_ms": 0.0029
+        },
+        "Conv5x5_w100": {
+          "mean_ms": 0.0893,
+          "std_ms": 0.0024
+        },
+        "Conv7x7_w50": {
+          "mean_ms": 0.0886,
+          "std_ms": 0.0029
+        },
+        "Conv7x7_w75": {
+          "mean_ms": 0.098,
+          "std_ms": 0.0052
+        },
+        "Conv7x7_w100": {
+          "mean_ms": 0.114,
+          "std_ms": 0.0042
+        },
+        "DWSep3x3_w50": {
+          "mean_ms": 0.0971,
+          "std_ms": 0.0043
+        },
+        "DWSep3x3_w75": {
+          "mean_ms": 0.0964,
+          "std_ms": 0.0036
+        },
+        "DWSep3x3_w100": {
+          "mean_ms": 0.0981,
+          "std_ms": 0.0046
+        },
+        "DWSep5x5_w50": {
+          "mean_ms": 0.0975,
+          "std_ms": 0.0055
+        },
+        "DWSep5x5_w75": {
+          "mean_ms": 0.0974,
+          "std_ms": 0.0043
+        },
+        "DWSep5x5_w100": {
+          "mean_ms": 0.0974,
+          "std_ms": 0.0047
+        }
+      }
+    },
+    "layer_2": {
+      "C_in": 256,
+      "C_out": 128,
+      "H_out": 32,
+      "W_out": 32,
+      "ops": {
+        "Conv3x3_w50": {
+          "mean_ms": 0.0613,
+          "std_ms": 0.0027
+        },
+        "Conv3x3_w75": {
+          "mean_ms": 0.063,
+          "std_ms": 0.0022
+        },
+        "Conv3x3_w100": {
+          "mean_ms": 0.065,
+          "std_ms": 0.0012
+        },
+        "Conv5x5_w50": {
+          "mean_ms": 0.0706,
+          "std_ms": 0.0014
+        },
+        "Conv5x5_w75": {
+          "mean_ms": 0.0781,
+          "std_ms": 0.0036
+        },
+        "Conv5x5_w100": {
+          "mean_ms": 0.0875,
+          "std_ms": 0.0023
+        },
+        "Conv7x7_w50": {
+          "mean_ms": 0.0823,
+          "std_ms": 0.0019
+        },
+        "Conv7x7_w75": {
+          "mean_ms": 0.0953,
+          "std_ms": 0.0022
+        },
+        "Conv7x7_w100": {
+          "mean_ms": 0.1083,
+          "std_ms": 0.0027
+        },
+        "DWSep3x3_w50": {
+          "mean_ms": 0.1741,
+          "std_ms": 0.0367
+        },
+        "DWSep3x3_w75": {
+          "mean_ms": 0.1551,
+          "std_ms": 0.0284
+        },
+        "DWSep3x3_w100": {
+          "mean_ms": 0.1741,
+          "std_ms": 0.0377
+        },
+        "DWSep5x5_w50": {
+          "mean_ms": 0.1065,
+          "std_ms": 0.0057
+        },
+        "DWSep5x5_w75": {
+          "mean_ms": 0.1029,
+          "std_ms": 0.0049
+        },
+        "DWSep5x5_w100": {
+          "mean_ms": 0.1054,
+          "std_ms": 0.0085
+        }
+      }
+    },
+    "layer_3": {
+      "C_in": 128,
+      "C_out": 64,
+      "H_out": 64,
+      "W_out": 64,
+      "ops": {
+        "Conv3x3_w50": {
+          "mean_ms": 0.065,
+          "std_ms": 0.0045
+        },
+        "Conv3x3_w75": {
+          "mean_ms": 0.0705,
+          "std_ms": 0.0033
+        },
+        "Conv3x3_w100": {
+          "mean_ms": 0.0721,
+          "std_ms": 0.0029
+        },
+        "Conv5x5_w50": {
+          "mean_ms": 0.0761,
+          "std_ms": 0.0027
+        },
+        "Conv5x5_w75": {
+          "mean_ms": 0.0896,
+          "std_ms": 0.004
+        },
+        "Conv5x5_w100": {
+          "mean_ms": 0.0984,
+          "std_ms": 0.0026
+        },
+        "Conv7x7_w50": {
+          "mean_ms": 0.0898,
+          "std_ms": 0.0022
+        },
+        "Conv7x7_w75": {
+          "mean_ms": 0.1113,
+          "std_ms": 0.0025
+        },
+        "Conv7x7_w100": {
+          "mean_ms": 0.127,
+          "std_ms": 0.0026
+        },
+        "DWSep3x3_w50": {
+          "mean_ms": 0.095,
+          "std_ms": 0.0052
+        },
+        "DWSep3x3_w75": {
+          "mean_ms": 0.0951,
+          "std_ms": 0.0056
+        },
+        "DWSep3x3_w100": {
+          "mean_ms": 0.096,
+          "std_ms": 0.0052
+        },
+        "DWSep5x5_w50": {
+          "mean_ms": 0.0941,
+          "std_ms": 0.0047
+        },
+        "DWSep5x5_w75": {
+          "mean_ms": 0.0933,
+          "std_ms": 0.0039
+        },
+        "DWSep5x5_w100": {
+          "mean_ms": 0.0928,
+          "std_ms": 0.0029
+        }
+      }
+    },
+    "layer_4": {
+      "C_in": 64,
+      "C_out": 32,
+      "H_out": 128,
+      "W_out": 128,
+      "ops": {
+        "Conv3x3_w50": {
+          "mean_ms": 0.1727,
+          "std_ms": 0.029
+        },
+        "Conv3x3_w75": {
+          "mean_ms": 0.1148,
+          "std_ms": 0.0053
+        },
+        "Conv3x3_w100": {
+          "mean_ms": 0.1102,
+          "std_ms": 0.0045
+        },
+        "Conv5x5_w50": {
+          "mean_ms": 0.1834,
+          "std_ms": 0.0431
+        },
+        "Conv5x5_w75": {
+          "mean_ms": 0.1193,
+          "std_ms": 0.0038
+        },
+        "Conv5x5_w100": {
+          "mean_ms": 0.119,
+          "std_ms": 0.0036
+        },
+        "Conv7x7_w50": {
+          "mean_ms": 0.1103,
+          "std_ms": 0.0048
+        },
+        "Conv7x7_w75": {
+          "mean_ms": 0.131,
+          "std_ms": 0.0039
+        },
+        "Conv7x7_w100": {
+          "mean_ms": 0.1314,
+          "std_ms": 0.0024
+        },
+        "DWSep3x3_w50": {
+          "mean_ms": 0.0785,
+          "std_ms": 0.0032
+        },
+        "DWSep3x3_w75": {
+          "mean_ms": 0.0957,
+          "std_ms": 0.0057
+        },
+        "DWSep3x3_w100": {
+          "mean_ms": 0.0936,
+          "std_ms": 0.004
+        },
+        "DWSep5x5_w50": {
+          "mean_ms": 0.1109,
+          "std_ms": 0.0029
+        },
+        "DWSep5x5_w75": {
+          "mean_ms": 0.1178,
+          "std_ms": 0.0026
+        },
+        "DWSep5x5_w100": {
+          "mean_ms": 0.1175,
+          "std_ms": 0.0026
+        }
+      }
+    }
+  },
+  "latency_range": {
+    "min_ms": 0.3997,
+    "max_ms": 0.8261
+  }
+}
