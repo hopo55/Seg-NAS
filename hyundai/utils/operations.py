@@ -400,3 +400,65 @@ class MixedOpWithWidth(nn.Module):
             flops_per_op = [f + proj_flops for f in flops_per_op]
 
         return flops_per_op[op_idx]
+
+    def get_arch_indices(self):
+        """
+        Return architecture indices for latency predictor.
+
+        Returns:
+            op_idx: Selected operation index (0-4)
+            width_idx: Selected width index (0-2)
+        """
+        op_idx = torch.argmax(self.alphas_op).item()
+        width_idx = torch.argmax(self.alphas_width).item()
+        return op_idx, width_idx
+
+    def get_sampled_latency(self, latency_lut, layer_idx, temperature=1.0):
+        """
+        Calculate latency using LUT and Gumbel-Softmax (differentiable).
+
+        Args:
+            latency_lut: LatencyLUT object with measured latencies
+            layer_idx: Index of this layer (0-4)
+            temperature: Gumbel-Softmax temperature
+
+        Returns:
+            Sampled latency in milliseconds (differentiable)
+        """
+        op_names = ['Conv3x3', 'Conv5x5', 'Conv7x7', 'DWSep3x3', 'DWSep5x5']
+
+        # Gumbel-Softmax sampling
+        op_weights = self._gumbel_softmax_op(temperature=temperature, hard=True)
+        width_weights = self._gumbel_softmax_width(temperature=temperature, hard=True)
+
+        total_latency = self.alphas_op.new_tensor(0.0)
+
+        for wi, wm in enumerate(self.width_mults):
+            latency_per_op = []
+            for op_name in op_names:
+                lat = latency_lut.get_op_latency(layer_idx, op_name, wm)
+                latency_per_op.append(lat)
+
+            latency_tensor = self.alphas_op.new_tensor(latency_per_op)
+            width_latency = (op_weights * latency_tensor).sum()
+            total_latency = total_latency + width_weights[wi] * width_latency
+
+        return total_latency
+
+    def get_argmax_latency(self, latency_lut, layer_idx):
+        """
+        Get latency of argmax selected operation (non-differentiable, for logging).
+
+        Args:
+            latency_lut: LatencyLUT object
+            layer_idx: Index of this layer (0-4)
+
+        Returns:
+            Latency in milliseconds
+        """
+        op_names = ['Conv3x3', 'Conv5x5', 'Conv7x7', 'DWSep3x3', 'DWSep5x5']
+        op_idx, width_idx = self.get_max_alpha_idx()
+        op_name = op_names[op_idx]
+        wm = self.width_mults[width_idx]
+
+        return latency_lut.get_op_latency(layer_idx, op_name, wm)

@@ -52,6 +52,25 @@ def get_args():
     parser.add_argument('--search_space', type=str, default='basic',
                         choices=['basic', 'extended'],
                         help='Search space type: basic (5 ops, 3125 archs) or extended (5 ops x 3 widths, 759375 archs)')
+
+    # LINAS: Latency-aware NAS arguments
+    parser.add_argument('--use_latency', action='store_true',
+                        help='Use latency-aware optimization instead of FLOPs')
+    parser.add_argument('--latency_lambda', type=float, default=1.0,
+                        help='Latency penalty weight for multi-objective NAS (default: 1.0)')
+    parser.add_argument('--target_latency', type=float, default=None,
+                        help='Target latency (ms) for architecture search. If set, loss = |predicted - target|.')
+    parser.add_argument('--lut_path', type=str, default=None,
+                        help='Path to latency LUT JSON file for current hardware')
+    parser.add_argument('--predictor_path', type=str, default=None,
+                        help='Path to trained latency predictor checkpoint')
+    parser.add_argument('--hardware_targets', type=str, default=None,
+                        help='JSON string of hardware targets, e.g., \'{"A6000": 50, "JetsonOrin": 100}\'')
+    parser.add_argument('--primary_hardware', type=str, default='A6000',
+                        choices=['A6000', 'RTX3090', 'RTX4090', 'JetsonOrin'],
+                        help='Primary hardware for single-hardware latency optimization')
+
+    # Comparison arguments
     parser.add_argument('--comparison', action='store_true',
                         help='Run comparison with baseline models (AutoPatch, RealtimeSeg style)')
     parser.add_argument('--baseline_models', type=str, nargs='+',

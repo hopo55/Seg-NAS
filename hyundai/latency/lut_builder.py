@@ -1,0 +1,351 @@
+"""
+Latency Look-Up Table Builder for multiple hardware platforms.
+
+This module measures the actual inference latency of each operation
+on target hardware and builds a LUT for efficient latency estimation.
+"""
+
+import torch
+import torch.nn as nn
+import time
+import json
+import numpy as np
+from pathlib import Path
+from tqdm import tqdm
+from typing import Dict, List, Tuple, Optional
+
+import sys
+sys.path.append(str(Path(__file__).parent.parent))
+
+from utils.operations import (
+    DepthwiseSeparableConvTranspose2d,
+    _same_padding
+)
+
+
+# Hardware specifications for encoding
+HARDWARE_SPECS = {
+    'A6000': {
+        'cuda_cores': 10752,
+        'memory_bandwidth': 768,  # GB/s
+        'tensor_cores': 336,
+        'memory_gb': 48,
+    },
+    'RTX3090': {
+        'cuda_cores': 10496,
+        'memory_bandwidth': 936,
+        'tensor_cores': 328,
+        'memory_gb': 24,
+    },
+    'RTX4090': {
+        'cuda_cores': 16384,
+        'memory_bandwidth': 1008,
+        'tensor_cores': 512,
+        'memory_gb': 24,
+    },
+    'JetsonOrin': {
+        'cuda_cores': 2048,
+        'memory_bandwidth': 205,
+        'tensor_cores': 64,
+        'memory_gb': 8,
+    },
+}
+
+# Operation names mapping
+OP_NAMES = ['Conv3x3', 'Conv5x5', 'Conv7x7', 'DWSep3x3', 'DWSep5x5', 'EdgeConv', 'DilatedDWSep']
+WIDTH_MULTS = [0.5, 0.75, 1.0]
+
+
+class LatencyLUTBuilder:
+    """
+    Build latency look-up table by measuring actual inference time.
+
+    Usage:
+        builder = LatencyLUTBuilder(input_size=128)
+        lut = builder.build_lut('RTX4090', save_path='lut_rtx4090.json')
+    """
+
+    def __init__(self, input_size: int = 128, warmup: int = 50, repeat: int = 100):
+        """
+        Args:
+            input_size: Input image size (assumes square)
+            warmup: Number of warmup iterations
+            repeat: Number of measurement iterations
+        """
+        self.input_size = input_size
+        self.warmup = warmup
+        self.repeat = repeat
+
+        # Layer configurations for decoder
+        H = input_size // 32
+        self.layer_configs = [
+            {'C_in': 1024, 'C_out': 512, 'H_out': H * 2, 'W_out': H * 2},   # deconv1: 4->8
+            {'C_in': 512, 'C_out': 256, 'H_out': H * 4, 'W_out': H * 4},    # deconv2: 8->16
+            {'C_in': 256, 'C_out': 128, 'H_out': H * 8, 'W_out': H * 8},    # deconv3: 16->32
+            {'C_in': 128, 'C_out': 64, 'H_out': H * 16, 'W_out': H * 16},   # deconv4: 32->64
+            {'C_in': 64, 'C_out': 32, 'H_out': H * 32, 'W_out': H * 32},    # deconv5: 64->128
+        ]
+
+    def _create_operation(self, op_name: str, C_in: int, C_out: int,
+                          width_mult: float = 1.0) -> nn.Module:
+        """Create a single operation module."""
+        C_mid = max(1, int(C_out * width_mult))
+
+        if op_name == 'Conv3x3':
+            return nn.ConvTranspose2d(C_in, C_mid, 3, stride=2, padding=1, output_padding=1)
+        elif op_name == 'Conv5x5':
+            return nn.ConvTranspose2d(C_in, C_mid, 5, stride=2, padding=2, output_padding=1)
+        elif op_name == 'Conv7x7':
+            return nn.ConvTranspose2d(C_in, C_mid, 7, stride=2, padding=3, output_padding=1)
+        elif op_name == 'DWSep3x3':
+            return DepthwiseSeparableConvTranspose2d(C_in, C_mid, 3, stride=2, padding=1, output_padding=1)
+        elif op_name == 'DWSep5x5':
+            return DepthwiseSeparableConvTranspose2d(C_in, C_mid, 5, stride=2, padding=2, output_padding=1)
+        elif op_name == 'EdgeConv':
+            from nas.search_space import EdgeAwareConvTranspose
+            return EdgeAwareConvTranspose(C_in, C_mid, stride=2)
+        elif op_name == 'DilatedDWSep':
+            from nas.search_space import DilatedDWSepConvTranspose
+            return DilatedDWSepConvTranspose(C_in, C_mid, kernel_size=3, stride=2, dilation=2)
+        else:
+            raise ValueError(f"Unknown operation: {op_name}")
+
+    def measure_op_latency(self, op: nn.Module, C_in: int, H_in: int, W_in: int,
+                           device: str = 'cuda') -> Tuple[float, float]:
+        """
+        Measure single operation latency.
+
+        Args:
+            op: Operation module
+            C_in: Input channels
+            H_in: Input height
+            W_in: Input width
+            device: Device to measure on
+
+        Returns:
+            (mean_latency_ms, std_latency_ms)
+        """
+        op = op.to(device).eval()
+        x = torch.randn(1, C_in, H_in, W_in, device=device)
+
+        # Warmup
+        with torch.no_grad():
+            for _ in range(self.warmup):
+                _ = op(x)
+
+        if device == 'cuda':
+            torch.cuda.synchronize()
+
+        # Measure
+        times = []
+        with torch.no_grad():
+            for _ in range(self.repeat):
+                if device == 'cuda':
+                    torch.cuda.synchronize()
+
+                start = time.perf_counter()
+                _ = op(x)
+
+                if device == 'cuda':
+                    torch.cuda.synchronize()
+
+                end = time.perf_counter()
+                times.append((end - start) * 1000)  # Convert to ms
+
+        return float(np.mean(times)), float(np.std(times))
+
+    def build_lut(self, hardware_name: str, save_path: Optional[str] = None,
+                  op_names: List[str] = None, width_mults: List[float] = None,
+                  device: str = 'cuda') -> Dict:
+        """
+        Build complete LUT for one hardware.
+
+        Args:
+            hardware_name: Name of hardware (for metadata)
+            save_path: Path to save JSON file
+            op_names: List of operation names to measure
+            width_mults: List of width multipliers
+            device: Device to measure on
+
+        Returns:
+            LUT dictionary
+        """
+        if op_names is None:
+            op_names = ['Conv3x3', 'Conv5x5', 'Conv7x7', 'DWSep3x3', 'DWSep5x5']
+        if width_mults is None:
+            width_mults = WIDTH_MULTS
+
+        lut = {
+            'hardware': hardware_name,
+            'input_size': self.input_size,
+            'warmup': self.warmup,
+            'repeat': self.repeat,
+            'layers': {}
+        }
+
+        print(f"\nBuilding LUT for {hardware_name}")
+        print(f"Operations: {op_names}")
+        print(f"Width multipliers: {width_mults}")
+        print("=" * 60)
+
+        for layer_idx, cfg in enumerate(tqdm(self.layer_configs, desc="Layers")):
+            layer_key = f"layer_{layer_idx}"
+            lut['layers'][layer_key] = {
+                'C_in': cfg['C_in'],
+                'C_out': cfg['C_out'],
+                'H_out': cfg['H_out'],
+                'W_out': cfg['W_out'],
+                'ops': {}
+            }
+
+            # Input size for this layer (before upsampling)
+            H_in = cfg['H_out'] // 2
+            W_in = cfg['W_out'] // 2
+
+            for op_name in op_names:
+                for wm in width_mults:
+                    try:
+                        # Create operation
+                        op = self._create_operation(
+                            op_name, cfg['C_in'], cfg['C_out'], wm
+                        )
+
+                        # Measure latency
+                        mean_lat, std_lat = self.measure_op_latency(
+                            op, cfg['C_in'], H_in, W_in, device
+                        )
+
+                        # Store in LUT
+                        key = f"{op_name}_w{int(wm*100)}"
+                        lut['layers'][layer_key]['ops'][key] = {
+                            'mean_ms': round(mean_lat, 4),
+                            'std_ms': round(std_lat, 4)
+                        }
+
+                    except Exception as e:
+                        print(f"Warning: Failed to measure {op_name}_w{int(wm*100)} "
+                              f"at layer {layer_idx}: {e}")
+                        continue
+
+        # Calculate total latency range
+        min_total, max_total = self._calculate_latency_range(lut)
+        lut['latency_range'] = {
+            'min_ms': round(min_total, 4),
+            'max_ms': round(max_total, 4)
+        }
+
+        print(f"\nLatency range: {min_total:.2f} - {max_total:.2f} ms")
+
+        if save_path:
+            save_path = Path(save_path)
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(save_path, 'w') as f:
+                json.dump(lut, f, indent=2)
+            print(f"LUT saved to: {save_path}")
+
+        return lut
+
+    def _calculate_latency_range(self, lut: Dict) -> Tuple[float, float]:
+        """Calculate min and max total latency from LUT."""
+        min_total = 0
+        max_total = 0
+
+        for layer_key in lut['layers']:
+            ops = lut['layers'][layer_key]['ops']
+            if ops:
+                latencies = [v['mean_ms'] for v in ops.values()]
+                min_total += min(latencies)
+                max_total += max(latencies)
+
+        return min_total, max_total
+
+    def build_all_hardware_luts(self, hardware_list: List[str] = None,
+                                 save_dir: str = './hyundai/latency/luts',
+                                 **kwargs) -> Dict[str, Dict]:
+        """
+        Build LUTs for all specified hardware.
+
+        Note: This requires running on each hardware separately.
+        For now, it builds LUT for the current hardware.
+        """
+        if hardware_list is None:
+            hardware_list = list(HARDWARE_SPECS.keys())
+
+        luts = {}
+        save_dir = Path(save_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        # Detect current hardware
+        if torch.cuda.is_available():
+            gpu_name = torch.cuda.get_device_name(0)
+            print(f"Detected GPU: {gpu_name}")
+
+            # Match to known hardware
+            current_hw = None
+            for hw_name in hardware_list:
+                if hw_name.lower() in gpu_name.lower():
+                    current_hw = hw_name
+                    break
+
+            if current_hw:
+                print(f"Building LUT for: {current_hw}")
+                lut = self.build_lut(
+                    current_hw,
+                    save_path=save_dir / f"lut_{current_hw.lower()}.json",
+                    **kwargs
+                )
+                luts[current_hw] = lut
+            else:
+                print(f"Warning: GPU '{gpu_name}' not in known hardware list.")
+                print(f"Building LUT with generic name...")
+                lut = self.build_lut(
+                    gpu_name.replace(' ', '_'),
+                    save_path=save_dir / f"lut_{gpu_name.replace(' ', '_').lower()}.json",
+                    **kwargs
+                )
+                luts[gpu_name] = lut
+        else:
+            print("No CUDA available. Building CPU LUT...")
+            lut = self.build_lut('CPU', save_path=save_dir / 'lut_cpu.json',
+                                 device='cpu', **kwargs)
+            luts['CPU'] = lut
+
+        return luts
+
+
+def load_lut(lut_path: str) -> Dict:
+    """Load LUT from JSON file."""
+    with open(lut_path, 'r') as f:
+        return json.load(f)
+
+
+def merge_luts(lut_paths: List[str], save_path: Optional[str] = None) -> Dict:
+    """
+    Merge multiple hardware LUTs into a single file.
+
+    Args:
+        lut_paths: List of LUT JSON file paths
+        save_path: Path to save merged LUT
+
+    Returns:
+        Merged LUT dictionary
+    """
+    merged = {'hardware_luts': {}}
+
+    for path in lut_paths:
+        lut = load_lut(path)
+        hw_name = lut['hardware']
+        merged['hardware_luts'][hw_name] = lut
+
+    if save_path:
+        with open(save_path, 'w') as f:
+            json.dump(merged, f, indent=2)
+
+    return merged
+
+
+if __name__ == '__main__':
+    # Example usage
+    builder = LatencyLUTBuilder(input_size=128, warmup=50, repeat=100)
+    luts = builder.build_all_hardware_luts()
+    print("\nLUT building complete!")

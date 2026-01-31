@@ -178,6 +178,102 @@ class SuperNet(nn.Module):
 
         return total_flops / 1e9  # Return in GFLOPs
 
+    def get_arch_indices(self):
+        """
+        Get architecture indices for all layers.
+
+        Returns:
+            op_indices: Tensor of shape [5] with operation indices
+            width_indices: Tensor of shape [5] with width indices
+        """
+        deconvs = [self.deconv1, self.deconv2, self.deconv3, self.deconv4, self.deconv5]
+
+        if self.search_space == 'extended':
+            op_indices = []
+            width_indices = []
+            for deconv in deconvs:
+                op_idx, width_idx = deconv.get_arch_indices()
+                op_indices.append(op_idx)
+                width_indices.append(width_idx)
+            return torch.tensor(op_indices), torch.tensor(width_indices)
+        else:
+            # Basic search space: only op indices, width is always 1.0
+            op_indices = [deconv.get_max_alpha_idx() for deconv in deconvs]
+            width_indices = [2, 2, 2, 2, 2]  # Index 2 = width 1.0
+            return torch.tensor(op_indices), torch.tensor(width_indices)
+
+    def get_sampled_latency(self, latency_lut, temperature=1.0):
+        """
+        Calculate total latency using LUT and Gumbel-Softmax (differentiable).
+
+        Args:
+            latency_lut: LatencyLUT object with measured latencies
+            temperature: Gumbel-Softmax temperature
+
+        Returns:
+            Total latency in milliseconds (differentiable)
+        """
+        if self.search_space != 'extended':
+            raise NotImplementedError("Latency sampling only supported for extended search space")
+
+        deconvs = [self.deconv1, self.deconv2, self.deconv3, self.deconv4, self.deconv5]
+
+        total_latency = deconvs[0].alphas_op.new_tensor(0.0)
+        for layer_idx, deconv in enumerate(deconvs):
+            total_latency = total_latency + deconv.get_sampled_latency(
+                latency_lut, layer_idx, temperature
+            )
+
+        return total_latency
+
+    def get_argmax_latency(self, latency_lut):
+        """
+        Get total latency of argmax selected architecture (non-differentiable).
+
+        Args:
+            latency_lut: LatencyLUT object
+
+        Returns:
+            Total latency in milliseconds
+        """
+        if self.search_space != 'extended':
+            raise NotImplementedError("Latency only supported for extended search space")
+
+        deconvs = [self.deconv1, self.deconv2, self.deconv3, self.deconv4, self.deconv5]
+
+        total_latency = 0.0
+        for layer_idx, deconv in enumerate(deconvs):
+            total_latency += deconv.get_argmax_latency(latency_lut, layer_idx)
+
+        return total_latency
+
+    def get_alpha_weights(self):
+        """
+        Get normalized alpha weights for all layers (for latency predictor).
+
+        Returns:
+            op_weights: Tensor [5, num_ops] - softmax weights for operations
+            width_weights: Tensor [5, num_widths] - softmax weights for widths
+        """
+        deconvs = [self.deconv1, self.deconv2, self.deconv3, self.deconv4, self.deconv5]
+
+        if self.search_space == 'extended':
+            op_weights = torch.stack([
+                torch.softmax(d.alphas_op, dim=0) for d in deconvs
+            ])
+            width_weights = torch.stack([
+                torch.softmax(d.alphas_width, dim=0) for d in deconvs
+            ])
+            return op_weights, width_weights
+        else:
+            op_weights = torch.stack([
+                torch.softmax(d.alphas, dim=0) for d in deconvs
+            ])
+            # For basic search space, width is always 1.0
+            width_weights = torch.zeros(5, 3)
+            width_weights[:, 2] = 1.0  # Index 2 = width 1.0
+            return op_weights, width_weights
+
 
 class OptimizedNetwork(nn.Module):
     """Extract the final architecture from SuperNet based on max alpha selection"""

@@ -13,13 +13,13 @@ TEST_RATIO=0.2
 
 # Set Train and Test Settings
 BATCH_SIZE=128
-ALPHA=0.01
+ALPHA=0.001
 W_LR=0.001
 OPT_LR=0.001
 W_DECAY=2e-4
 CLIP=5.0
-W_EPOCHS=1
-EPOCHS=2
+W_EPOCHS=5
+EPOCHS=20
 
 # Search Space Settings
 # 'basic': 5 ops (Conv3x3, Conv5x5, Conv7x7, DWSep3x3, DWSep5x5) = 3,125 architectures

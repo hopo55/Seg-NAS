@@ -1,11 +1,12 @@
 import torch
 import torch.nn as nn
 from datetime import datetime
+from pathlib import Path
 
 import wandb
 from utils.utils import set_device, check_tensor_in_list, get_model_complexity
 from nas.supernet_dense import SuperNet, OptimizedNetwork
-from nas.train_supernet import train_architecture
+from nas.train_supernet import train_architecture, train_architecture_with_latency
 from nas.train_samplenet import train_samplenet
 
 def search_architecture(args, dataset):
@@ -63,6 +64,113 @@ def search_architecture(args, dataset):
     )
 
     return model
+
+
+def search_architecture_linas(args, dataset):
+    """
+    LINAS: Latency-aware architecture search.
+
+    This function performs NAS with latency-aware multi-objective optimization
+    instead of FLOPs-based optimization.
+    """
+    device = set_device(args.gpu_idx)
+
+    # Create SuperNet (extended search space required for latency)
+    search_space = 'extended'  # LINAS requires extended search space
+    model = SuperNet(n_class=2, search_space=search_space)
+
+    print(f"LINAS Search Space: {search_space}")
+    print("  - 5 operations (Conv3x3, Conv5x5, Conv7x7, DWSep3x3, DWSep5x5)")
+    print("  - 3 width multipliers (0.5x, 0.75x, 1.0x)")
+    print("  - Total: 759,375 architectures")
+
+    model = model.to(device)
+    use_dp = torch.cuda.is_available() and len(args.gpu_idx) >= 2
+    if use_dp:
+        model = torch.nn.DataParallel(model, device_ids=args.gpu_idx)
+        print(f"Using multiple GPUs: {args.gpu_idx}")
+    else:
+        if device.type == "cuda":
+            print(f"Using single GPU: cuda:{args.gpu_idx[0]}")
+        else:
+            print("Using CPU")
+
+    loss = nn.CrossEntropyLoss()
+
+    # Get alpha and weight parameters
+    alphas_params = [
+        param for name, param in model.named_parameters() if "alpha" in name.lower()
+    ]
+    weight_params = [
+        param
+        for param in model.parameters()
+        if not check_tensor_in_list(param, alphas_params)
+    ]
+
+    optimizer_alpha = torch.optim.Adam(alphas_params, lr=args.alpha_lr)
+    optimizer_weight = torch.optim.Adam(weight_params, lr=args.weight_lr)
+
+    # Setup save directory
+    data_name = args.data if isinstance(args.data, str) else "_".join(args.data)
+    timestamp = str(datetime.now().date()) + "_" + datetime.now().strftime("%H_%M_%S")
+    target_lat = getattr(args, 'target_latency', None) or 'min'
+    args.save_dir = f"./hyundai/checkpoints/linas_{data_name}_seed{args.seed}_lat{target_lat}_lambda{args.latency_lambda}/{timestamp}/"
+
+    # Load latency predictor or LUT
+    latency_predictor = None
+    latency_lut = None
+    hardware_targets = None
+
+    # Option 1: Multi-hardware predictor
+    predictor_path = getattr(args, 'predictor_path', None)
+    if predictor_path and Path(predictor_path).exists():
+        print(f"Loading latency predictor from: {predictor_path}")
+        from latency import CrossHardwareLatencyPredictor
+        latency_predictor = CrossHardwareLatencyPredictor()
+        latency_predictor.load_state_dict(torch.load(predictor_path))
+        latency_predictor = latency_predictor.to(device)
+        latency_predictor.eval()
+
+        # Get hardware targets
+        hardware_targets = getattr(args, 'hardware_targets_dict', None)
+        if hardware_targets:
+            print(f"Hardware targets: {hardware_targets}")
+
+    # Option 2: Single-hardware LUT
+    lut_path = getattr(args, 'lut_path', None)
+    if lut_path and Path(lut_path).exists() and latency_predictor is None:
+        print(f"Loading latency LUT from: {lut_path}")
+        from latency import LatencyLUT
+        latency_lut = LatencyLUT(lut_path)
+        print(f"LUT hardware: {latency_lut.hardware_name}")
+
+    # Print optimization mode
+    if latency_predictor is not None:
+        print("\nOptimization: Multi-hardware latency (predictor-based)")
+    elif latency_lut is not None:
+        target = getattr(args, 'target_latency', None)
+        if target:
+            print(f"\nOptimization: Single-hardware latency (target: {target}ms)")
+        else:
+            print("\nOptimization: Single-hardware latency (minimize)")
+    else:
+        print("\nWarning: No latency info provided, falling back to FLOPs")
+
+    # Train with latency-aware optimization
+    train_architecture_with_latency(
+        args,
+        model,
+        dataset,
+        loss,
+        optimizer_alpha,
+        optimizer_weight,
+        latency_predictor=latency_predictor,
+        latency_lut=latency_lut,
+        hardware_targets=hardware_targets,
+    )
+
+    return model
+
 
 def train_searched_model(args, opt_model, dataset):
     device = set_device(args.gpu_idx)
