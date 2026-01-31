@@ -1,5 +1,9 @@
-torch
-torchvision
+# CUDA version note (lab conda): 11.7
+# Lab conda versions:
+# torch==1.13.1+cu117
+# torchvision==0.14.1+cu117
+torch==1.13.1+cu117
+torchvision==0.14.1+cu117
 numpy
 pandas
 Pillow
