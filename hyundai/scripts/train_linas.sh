@@ -3,17 +3,22 @@
 # LINAS: Latency-aware Industrial NAS Training Script
 # =============================================================================
 #
-# This script trains the LINAS model with latency-aware multi-objective
-# optimization for real-time industrial sealer segmentation.
+# Two modes:
+#   1. single: Single hardware LUT-based optimization
+#   2. pareto: RF-DETR style - Train once, discover Pareto curve for all hardware
 #
 # Usage:
-#   bash hyundai/scripts/train_linas.sh
+#   # Pareto mode (recommended) - discovers optimal architectures for all hardware
+#   bash hyundai/scripts/train_linas.sh pareto
+#
+#   # Single hardware mode
+#   bash hyundai/scripts/train_linas.sh JetsonOrin
+#   bash hyundai/scripts/train_linas.sh A6000
 #
 # =============================================================================
 
 # Environment
 SEEDS=(0)
-MODE='nas'
 DATA='all'
 GPU='0'
 
@@ -36,35 +41,24 @@ EPOCHS=20
 SEARCH_SPACE='extended'
 
 # LINAS Settings
-USE_LATENCY=true
 LATENCY_LAMBDA=1.0
 
 # Target latencies (ms) for each hardware - cycle time constraint: 100ms
-# These are per-image latencies (batch=1)
 declare -A HARDWARE_TARGETS
 HARDWARE_TARGETS[A6000]=50      # High-end workstation
 HARDWARE_TARGETS[RTX3090]=60    # Consumer high-end
 HARDWARE_TARGETS[RTX4090]=40    # Latest consumer
 HARDWARE_TARGETS[JetsonOrin]=95 # Edge device (tight constraint)
 
-# Primary hardware for single-target experiments
-PRIMARY_HARDWARE='JetsonOrin'  # Focus on edge deployment
+# Pareto search settings
+PARETO_SAMPLES=1000     # Number of architectures to sample
+PARETO_EVAL_SUBSET=100  # Number to actually evaluate
 
-# LUT paths (generate these first with measure_latency.sh)
+# LUT directory
 LUT_DIR='./hyundai/latency/luts'
 
-# Predictor path (train predictor first if using multi-hardware)
-PREDICTOR_PATH='./hyundai/latency/predictor.pt'
-
-# Experiment modes
-# 1. single: Single hardware LUT-based optimization
-# 2. multi: Multi-hardware predictor-based optimization
-# 3. comparison: Compare with baselines
-EXPERIMENT_MODE='single'  # Options: single, multi, comparison
-
-# Comparison settings
-COMPARISON=true
-BASELINE_MODELS="autopatch realtimeseg deeplabv3plus"
+# Mode from command line argument (default: pareto)
+MODE_ARG=${1:-pareto}
 
 # =============================================================================
 # Helper Functions
@@ -73,7 +67,6 @@ BASELINE_MODELS="autopatch realtimeseg deeplabv3plus"
 PYTHON=${PYTHON:-python3}
 
 build_hardware_targets_json() {
-    # Build JSON string for hardware targets
     local json="{"
     local first=true
     for hw in "${!HARDWARE_TARGETS[@]}"; do
@@ -88,34 +81,84 @@ build_hardware_targets_json() {
     echo "$json"
 }
 
-run_linas_single() {
+run_pareto() {
     local SEED=$1
-    local TARGET_LAT=$2
-    local HARDWARE=$3
+    local HW_TARGETS=$(build_hardware_targets_json)
 
+    echo "========================================"
+    echo "PARETO-BASED NAS (RF-DETR Style)"
+    echo "  Seed: $SEED"
+    echo "  Samples: $PARETO_SAMPLES"
+    echo "  Eval Subset: $PARETO_EVAL_SUBSET"
+    echo "  Hardware Targets: $HW_TARGETS"
+    echo "========================================"
+
+    # Check if at least one LUT exists
+    local LUT_COUNT=0
+    for HW in A6000 RTX3090 RTX4090 JetsonOrin; do
+        local LUT_PATH="${LUT_DIR}/lut_${HW,,}.json"
+        if [ -f "$LUT_PATH" ]; then
+            ((LUT_COUNT++))
+            echo "  Found LUT: $LUT_PATH"
+        fi
+    done
+
+    if [ $LUT_COUNT -eq 0 ]; then
+        echo "Error: No LUT files found in $LUT_DIR"
+        echo "Please run measure_latency.sh first"
+        exit 1
+    fi
+
+    $PYTHON hyundai/main.py \
+        --seed $SEED \
+        --mode pareto \
+        --data $DATA \
+        --data_dir $DATA_DIR \
+        --resize $RESIZE \
+        --ratios $TEST_RATIO \
+        --gpu_idx $GPU \
+        --alpha_lr $ALPHA_LR \
+        --train_size $BATCH_SIZE \
+        --test_size $BATCH_SIZE \
+        --weight_lr $W_LR \
+        --weight_decay $W_DECAY \
+        --warmup_epochs $W_EPOCHS \
+        --epochs $EPOCHS \
+        --clip_grad $CLIP \
+        --opt_lr $OPT_LR \
+        --search_space $SEARCH_SPACE \
+        --latency_lambda $LATENCY_LAMBDA \
+        --use_latency \
+        --lut_dir $LUT_DIR \
+        --hardware_targets "$HW_TARGETS" \
+        --pareto_samples $PARETO_SAMPLES \
+        --pareto_eval_subset $PARETO_EVAL_SUBSET \
+        --primary_hardware JetsonOrin
+}
+
+run_single() {
+    local SEED=$1
+    local HARDWARE=$2
+    local TARGET_LAT=${HARDWARE_TARGETS[$HARDWARE]}
     local LUT_PATH="${LUT_DIR}/lut_${HARDWARE,,}.json"
 
     echo "========================================"
-    echo "LINAS Single-Hardware Training"
+    echo "SINGLE-HARDWARE NAS"
     echo "  Seed: $SEED"
     echo "  Hardware: $HARDWARE"
     echo "  Target Latency: ${TARGET_LAT}ms"
     echo "  LUT: $LUT_PATH"
     echo "========================================"
 
-    # Check if LUT exists
     if [ ! -f "$LUT_PATH" ]; then
-        echo "Warning: LUT file not found: $LUT_PATH"
-        echo "Please run measure_latency.sh first to generate LUTs"
-        echo "Falling back to FLOPs-based optimization..."
-        USE_LATENCY_FLAG=""
-    else
-        USE_LATENCY_FLAG="--use_latency --lut_path $LUT_PATH"
+        echo "Error: LUT file not found: $LUT_PATH"
+        echo "Please run measure_latency.sh on $HARDWARE first"
+        exit 1
     fi
 
     $PYTHON hyundai/main.py \
         --seed $SEED \
-        --mode $MODE \
+        --mode nas \
         --data $DATA \
         --data_dir $DATA_DIR \
         --resize $RESIZE \
@@ -134,77 +177,8 @@ run_linas_single() {
         --latency_lambda $LATENCY_LAMBDA \
         --target_latency $TARGET_LAT \
         --primary_hardware $HARDWARE \
-        $USE_LATENCY_FLAG
-}
-
-run_linas_multi() {
-    local SEED=$1
-
-    local HW_TARGETS=$(build_hardware_targets_json)
-
-    echo "========================================"
-    echo "LINAS Multi-Hardware Training"
-    echo "  Seed: $SEED"
-    echo "  Hardware Targets: $HW_TARGETS"
-    echo "  Predictor: $PREDICTOR_PATH"
-    echo "========================================"
-
-    # Check if predictor exists
-    if [ ! -f "$PREDICTOR_PATH" ]; then
-        echo "Warning: Predictor not found: $PREDICTOR_PATH"
-        echo "Please train the predictor first"
-        exit 1
-    fi
-
-    $PYTHON hyundai/main.py \
-        --seed $SEED \
-        --mode $MODE \
-        --data $DATA \
-        --data_dir $DATA_DIR \
-        --resize $RESIZE \
-        --ratios $TEST_RATIO \
-        --gpu_idx $GPU \
-        --alpha_lr $ALPHA_LR \
-        --train_size $BATCH_SIZE \
-        --test_size $BATCH_SIZE \
-        --weight_lr $W_LR \
-        --weight_decay $W_DECAY \
-        --warmup_epochs $W_EPOCHS \
-        --epochs $EPOCHS \
-        --clip_grad $CLIP \
-        --opt_lr $OPT_LR \
-        --search_space $SEARCH_SPACE \
-        --latency_lambda $LATENCY_LAMBDA \
         --use_latency \
-        --predictor_path $PREDICTOR_PATH \
-        --hardware_targets "$HW_TARGETS"
-}
-
-run_comparison() {
-    local SEED=$1
-
-    echo "========================================"
-    echo "Running Baseline Comparison"
-    echo "  Seed: $SEED"
-    echo "  Baselines: $BASELINE_MODELS"
-    echo "========================================"
-
-    $PYTHON hyundai/main.py \
-        --seed $SEED \
-        --mode $MODE \
-        --data $DATA \
-        --data_dir $DATA_DIR \
-        --resize $RESIZE \
-        --ratios $TEST_RATIO \
-        --gpu_idx $GPU \
-        --train_size $BATCH_SIZE \
-        --test_size $BATCH_SIZE \
-        --weight_lr $W_LR \
-        --weight_decay $W_DECAY \
-        --epochs $EPOCHS \
-        --opt_lr $OPT_LR \
-        --comparison \
-        --baseline_models $BASELINE_MODELS
+        --lut_path $LUT_PATH
 }
 
 # =============================================================================
@@ -214,42 +188,32 @@ run_comparison() {
 echo "=============================================="
 echo "LINAS: Latency-aware Industrial NAS"
 echo "=============================================="
-echo "Experiment Mode: $EXPERIMENT_MODE"
+echo "Mode: $MODE_ARG"
 echo "Search Space: $SEARCH_SPACE"
 echo "Seeds: ${SEEDS[*]}"
 echo "=============================================="
 
-case $EXPERIMENT_MODE in
-    "single")
-        echo "Running Single-Hardware Experiments..."
-        for SEED in "${SEEDS[@]}"; do
-            run_linas_single $SEED ${HARDWARE_TARGETS[$PRIMARY_HARDWARE]} $PRIMARY_HARDWARE
-        done
-        ;;
-
-    "multi")
-        echo "Running Multi-Hardware Experiments..."
-        for SEED in "${SEEDS[@]}"; do
-            run_linas_multi $SEED
-        done
-        ;;
-
-    "comparison")
-        echo "Running Comparison Experiments..."
-        for SEED in "${SEEDS[@]}"; do
-            # First run LINAS
-            run_linas_single $SEED ${HARDWARE_TARGETS[$PRIMARY_HARDWARE]} $PRIMARY_HARDWARE
-            # Then run baselines
-            run_comparison $SEED
-        done
-        ;;
-
-    *)
-        echo "Unknown experiment mode: $EXPERIMENT_MODE"
-        echo "Options: single, multi, comparison"
-        exit 1
-        ;;
-esac
+if [ "$MODE_ARG" = "pareto" ]; then
+    # Pareto mode: Train once, discover all optimal architectures
+    for SEED in "${SEEDS[@]}"; do
+        run_pareto $SEED
+    done
+elif [[ " A6000 RTX3090 RTX4090 JetsonOrin " =~ " ${MODE_ARG} " ]]; then
+    # Single hardware mode
+    for SEED in "${SEEDS[@]}"; do
+        run_single $SEED $MODE_ARG
+    done
+else
+    echo "Error: Invalid mode/hardware '$MODE_ARG'"
+    echo ""
+    echo "Usage:"
+    echo "  bash train_linas.sh pareto      # RF-DETR style Pareto discovery"
+    echo "  bash train_linas.sh JetsonOrin  # Single hardware optimization"
+    echo "  bash train_linas.sh A6000"
+    echo "  bash train_linas.sh RTX3090"
+    echo "  bash train_linas.sh RTX4090"
+    exit 1
+fi
 
 echo "=============================================="
 echo "LINAS Training Complete!"

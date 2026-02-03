@@ -6,7 +6,13 @@ from utils.argument import get_args
 from utils.utils import set_seed
 
 from preprocessing import get_roi, get_dataset
-from segmentation import search_architecture, search_architecture_linas, train_searched_model
+from segmentation import (
+    search_architecture,
+    search_architecture_linas,
+    train_searched_model,
+    search_and_discover_pareto,
+    discover_pareto_architectures
+)
 from comparison import run_comparison
 from test import test_model
 
@@ -52,7 +58,39 @@ def main():
     # get_roi(args.data)
     dataset = get_dataset(args)
 
-    if args.mode in ['nas', 'ind', 'zero']:
+    if args.mode == 'pareto':
+        # RF-DETR style: Train supernet + Discover Pareto curve
+        print("\n" + "=" * 60)
+        print("PARETO-BASED NAS (RF-DETR Style)")
+        print("=" * 60)
+
+        model, selected_archs, pareto_front = search_and_discover_pareto(args, dataset)
+
+        # Train the best architecture for primary hardware
+        primary_hw = getattr(args, 'primary_hardware', 'JetsonOrin')
+        if primary_hw in selected_archs:
+            best_arch = selected_archs[primary_hw]
+            print(f"\nTraining selected architecture for {primary_hw}...")
+
+            # Set the supernet to the selected architecture before extracting
+            if hasattr(model, 'module'):
+                module = model.module
+            else:
+                module = model
+
+            for i, deconv in enumerate([module.deconv1, module.deconv2,
+                                        module.deconv3, module.deconv4, module.deconv5]):
+                if hasattr(deconv, 'alphas_op'):
+                    deconv.alphas_op.data.fill_(-10)
+                    deconv.alphas_op.data[best_arch.op_indices[i]] = 10
+                    deconv.alphas_width.data.fill_(-10)
+                    deconv.alphas_width.data[best_arch.width_indices[i]] = 10
+
+            train_searched_model(args, model, dataset)
+
+        wandb.finish()
+
+    elif args.mode in ['nas', 'ind', 'zero']:
         # Search Architecture
         use_latency = getattr(args, 'use_latency', False)
 
@@ -78,6 +116,7 @@ def main():
             run_comparison(args, dataset)
 
         wandb.finish()
+
     elif args.mode == 'hot':
         # Model Testing
         test_model(args, dataset)

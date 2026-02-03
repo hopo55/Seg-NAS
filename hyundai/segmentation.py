@@ -2,12 +2,14 @@ import torch
 import torch.nn as nn
 from datetime import datetime
 from pathlib import Path
+import json
 
 import wandb
 from utils.utils import set_device, check_tensor_in_list, get_model_complexity
 from nas.supernet_dense import SuperNet, OptimizedNetwork
 from nas.train_supernet import train_architecture, train_architecture_with_latency
 from nas.train_samplenet import train_samplenet
+from nas.pareto_search import ParetoSearcher, print_pareto_summary
 
 def search_architecture(args, dataset):
     device = set_device(args.gpu_idx)
@@ -241,3 +243,148 @@ def train_searched_model(args, opt_model, dataset):
         loss,
         optimizer
     )
+
+
+def discover_pareto_architectures(args, model, dataset):
+    """
+    RF-DETR style: Discover accuracy-latency Pareto curve from trained supernet.
+
+    This function:
+    1. Takes a trained supernet
+    2. Samples thousands of architectures
+    3. Evaluates each with weight-sharing (no re-training)
+    4. Computes latency using LUT for each hardware
+    5. Extracts Pareto-optimal architectures
+    6. Selects best architecture for each target latency
+
+    Args:
+        args: Arguments containing lut_dir, target_latency, etc.
+        model: Trained supernet
+        dataset: Dataset for evaluation
+    """
+    device = set_device(args.gpu_idx)
+
+    # Load LUTs for all hardware
+    lut_dir = Path(getattr(args, 'lut_dir', './hyundai/latency/luts'))
+    hardware_list = getattr(args, 'hardware_list', ['A6000', 'RTX3090', 'RTX4090', 'JetsonOrin'])
+
+    from latency import LatencyLUT
+    luts = {}
+    for hw in hardware_list:
+        lut_path = lut_dir / f'lut_{hw.lower()}.json'
+        if lut_path.exists():
+            luts[hw] = LatencyLUT(str(lut_path))
+            print(f"Loaded LUT for {hw}")
+        else:
+            print(f"Warning: LUT not found for {hw}: {lut_path}")
+
+    if not luts:
+        raise RuntimeError("No LUT files found. Run measure_latency.sh first.")
+
+    # Create validation loader
+    val_loader = torch.utils.data.DataLoader(
+        dataset['valid'],
+        batch_size=args.test_size,
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True
+    )
+
+    # Create Pareto searcher
+    searcher = ParetoSearcher(model, luts)
+
+    # Discover Pareto curve
+    num_samples = getattr(args, 'pareto_samples', 1000)
+    eval_subset = getattr(args, 'pareto_eval_subset', 100)
+
+    print("\n" + "=" * 70)
+    print("PARETO-BASED ARCHITECTURE DISCOVERY (RF-DETR Style)")
+    print("=" * 70)
+    print(f"  Sampling: {num_samples} architectures")
+    print(f"  Evaluating: {eval_subset} architectures (weight-sharing)")
+    print(f"  Hardware: {list(luts.keys())}")
+    print("=" * 70 + "\n")
+
+    pareto_front = searcher.discover_pareto_curve(
+        val_loader, device,
+        num_samples=num_samples,
+        eval_subset=eval_subset,
+        strategy='mixed'
+    )
+
+    # Print summary
+    print_pareto_summary(pareto_front)
+
+    # Save results
+    save_dir = Path(args.save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    searcher.save_results(str(save_dir / 'pareto_results.json'))
+
+    # Select best architectures for each hardware's target latency
+    hardware_targets = getattr(args, 'hardware_targets_dict', {
+        'A6000': 50,
+        'RTX3090': 60,
+        'RTX4090': 40,
+        'JetsonOrin': 95
+    })
+
+    print("\n" + "=" * 70)
+    print("SELECTED ARCHITECTURES FOR TARGET LATENCIES")
+    print("=" * 70)
+
+    selected_archs = {}
+    for hw, target_lat in hardware_targets.items():
+        if hw in luts:
+            arch = searcher.select_architecture(hw, target_lat, prefer='accuracy')
+            if arch:
+                selected_archs[hw] = arch
+                actual_lat = arch.latencies.get(hw, 0)
+                print(f"\n{hw} (target: {target_lat}ms):")
+                print(f"  Accuracy: {arch.accuracy:.4f}")
+                print(f"  Latency:  {actual_lat:.2f}ms")
+                print(f"  Ops:      {arch.op_indices}")
+                print(f"  Widths:   {arch.width_indices}")
+
+                # Log to wandb
+                wandb.log({
+                    f'Pareto/{hw}/accuracy': arch.accuracy,
+                    f'Pareto/{hw}/latency_ms': actual_lat,
+                    f'Pareto/{hw}/target_ms': target_lat,
+                    f'Pareto/{hw}/meets_target': actual_lat <= target_lat
+                })
+
+    print("\n" + "=" * 70)
+
+    # Save selected architectures
+    selected_dict = {
+        hw: arch.to_dict() for hw, arch in selected_archs.items()
+    }
+    with open(save_dir / 'selected_architectures.json', 'w') as f:
+        json.dump(selected_dict, f, indent=2)
+
+    return selected_archs, pareto_front
+
+
+def search_and_discover_pareto(args, dataset):
+    """
+    Two-phase approach:
+    1. Train supernet with latency-aware NAS
+    2. Discover Pareto-optimal architectures
+
+    This is the main entry point for RF-DETR style NAS.
+    """
+    print("\n" + "=" * 70)
+    print("PHASE 1: SUPERNET TRAINING")
+    print("=" * 70 + "\n")
+
+    # Phase 1: Train supernet
+    model = search_architecture_linas(args, dataset)
+
+    print("\n" + "=" * 70)
+    print("PHASE 2: PARETO DISCOVERY")
+    print("=" * 70 + "\n")
+
+    # Phase 2: Discover Pareto curve
+    selected_archs, pareto_front = discover_pareto_architectures(args, model, dataset)
+
+    return model, selected_archs, pareto_front

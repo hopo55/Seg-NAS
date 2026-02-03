@@ -7,11 +7,12 @@ def get_args():
     # Environment Argument
     parser.add_argument('--seed', type=int, default=42, help="Seed value to ensure reproducibility.")
     # Preprocessing Argument
-    parser.add_argument('--mode', type=str, default='nas', choices=['nas', 'ind', 'zero', 'hot'],
+    parser.add_argument('--mode', type=str, default='nas', choices=['nas', 'ind', 'zero', 'hot', 'pareto'],
                         help='(nas): train and test the optimized model\n'
                             '(ind): train and test individual models\n'
                             '(zero): training for zero-shot testing\n'
-                            '(hot): train and test a model on the hot-stamping dataset')
+                            '(hot): train and test a model on the hot-stamping dataset\n'
+                            '(pareto): RF-DETR style Pareto-based NAS')
     parser.add_argument('--data', type=str, default=['all'], nargs='+', 
                         choices=['all', 'ce', 'df', 'gn7norm', 'gn7pano'],
                         help='select one or more datasets')
@@ -69,6 +70,17 @@ def get_args():
     parser.add_argument('--primary_hardware', type=str, default='A6000',
                         choices=['A6000', 'RTX3090', 'RTX4090', 'JetsonOrin'],
                         help='Primary hardware for single-hardware latency optimization')
+    parser.add_argument('--lut_dir', type=str, default='./hyundai/latency/luts',
+                        help='Directory containing LUT files for all hardware')
+    parser.add_argument('--hardware_list', type=str, nargs='+',
+                        default=['A6000', 'RTX3090', 'RTX4090', 'JetsonOrin'],
+                        help='List of hardware to consider for Pareto search')
+
+    # Pareto search arguments (RF-DETR style)
+    parser.add_argument('--pareto_samples', type=int, default=1000,
+                        help='Number of architectures to sample for Pareto discovery (default: 1000)')
+    parser.add_argument('--pareto_eval_subset', type=int, default=100,
+                        help='Number of architectures to actually evaluate with weight-sharing (default: 100)')
 
     # Comparison arguments
     parser.add_argument('--comparison', action='store_true',
