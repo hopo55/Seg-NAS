@@ -109,8 +109,8 @@ class ParetoSearcher:
             else:
                 module = self.supernet
             op_weights, width_weights = module.get_alpha_weights()
-            op_probs = F.softmax(op_weights * 2, dim=-1).cpu().numpy()  # Temperature 0.5
-            width_probs = F.softmax(width_weights * 2, dim=-1).cpu().numpy()
+            op_probs = F.softmax(op_weights * 2, dim=-1).detach().cpu().numpy()  # Temperature 0.5
+            width_probs = F.softmax(width_weights * 2, dim=-1).detach().cpu().numpy()
 
             op_indices = []
             width_indices = []
