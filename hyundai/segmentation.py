@@ -12,7 +12,9 @@ from nas.train_samplenet import train_samplenet
 from nas.pareto_search import ParetoSearcher, print_pareto_summary
 
 def search_architecture(args, dataset):
-    device = set_device(args.gpu_idx)
+    # Set device (use local_rank for DDP if available)
+    local_rank = getattr(args, 'local_rank', None)
+    device = set_device(args.gpu_idx, local_rank=local_rank)
 
     # Create SuperNet with specified search space
     search_space = getattr(args, 'search_space', 'basic')
@@ -27,10 +29,24 @@ def search_architecture(args, dataset):
         print("  - Total: 5^5 = 3,125 architectures")
 
     model = model.to(device)
-    use_dp = torch.cuda.is_available() and len(args.gpu_idx) >= 2
-    if use_dp:
+
+    # Distributed training setup
+    if hasattr(args, 'distributed') and args.distributed:
+        # Convert BatchNorm to SyncBatchNorm for DDP
+        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+        # Wrap with DDP
+        model = torch.nn.parallel.DistributedDataParallel(
+            model,
+            device_ids=[args.local_rank],
+            output_device=args.local_rank,
+            find_unused_parameters=False
+        )
+        if args.rank == 0:
+            print(f"Using DDP with {args.world_size} GPUs")
+    # Fallback to DataParallel (legacy support)
+    elif torch.cuda.is_available() and len(args.gpu_idx) >= 2:
         model = torch.nn.DataParallel(model, device_ids=args.gpu_idx)
-        print(f"Using multiple GPUs: {args.gpu_idx}")
+        print(f"Using DataParallel with GPUs: {args.gpu_idx}")
     else:
         if device.type == "cuda":
             print(f"Using single GPU: cuda:{args.gpu_idx[0]}")
@@ -75,7 +91,9 @@ def search_architecture_linas(args, dataset):
     This function performs NAS with latency-aware multi-objective optimization
     instead of FLOPs-based optimization.
     """
-    device = set_device(args.gpu_idx)
+    # Set device (use local_rank for DDP if available)
+    local_rank = getattr(args, 'local_rank', None)
+    device = set_device(args.gpu_idx, local_rank=local_rank)
 
     # Create SuperNet (extended search space required for latency)
     search_space = 'extended'  # LINAS requires extended search space
@@ -87,10 +105,24 @@ def search_architecture_linas(args, dataset):
     print("  - Total: 759,375 architectures")
 
     model = model.to(device)
-    use_dp = torch.cuda.is_available() and len(args.gpu_idx) >= 2
-    if use_dp:
+
+    # Distributed training setup
+    if hasattr(args, 'distributed') and args.distributed:
+        # Convert BatchNorm to SyncBatchNorm for DDP
+        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+        # Wrap with DDP
+        model = torch.nn.parallel.DistributedDataParallel(
+            model,
+            device_ids=[args.local_rank],
+            output_device=args.local_rank,
+            find_unused_parameters=False
+        )
+        if args.rank == 0:
+            print(f"Using DDP with {args.world_size} GPUs")
+    # Fallback to DataParallel (legacy support)
+    elif torch.cuda.is_available() and len(args.gpu_idx) >= 2:
         model = torch.nn.DataParallel(model, device_ids=args.gpu_idx)
-        print(f"Using multiple GPUs: {args.gpu_idx}")
+        print(f"Using DataParallel with GPUs: {args.gpu_idx}")
     else:
         if device.type == "cuda":
             print(f"Using single GPU: cuda:{args.gpu_idx[0]}")
@@ -175,7 +207,9 @@ def search_architecture_linas(args, dataset):
 
 
 def train_searched_model(args, opt_model, dataset):
-    device = set_device(args.gpu_idx)
+    # Set device (use local_rank for DDP if available)
+    local_rank = getattr(args, 'local_rank', None)
+    device = set_device(args.gpu_idx, local_rank=local_rank)
 
     # Extract architecture description before creating OptimizedNetwork
     if isinstance(opt_model, torch.nn.DataParallel):
@@ -214,10 +248,24 @@ def train_searched_model(args, opt_model, dataset):
 
     opt_model = OptimizedNetwork(opt_model)
     opt_model = opt_model.to(device)
-    use_dp = torch.cuda.is_available() and len(args.gpu_idx) >= 2
-    if use_dp:
+
+    # Distributed training setup
+    if hasattr(args, 'distributed') and args.distributed:
+        # Convert BatchNorm to SyncBatchNorm for DDP
+        opt_model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(opt_model)
+        # Wrap with DDP
+        opt_model = torch.nn.parallel.DistributedDataParallel(
+            opt_model,
+            device_ids=[args.local_rank],
+            output_device=args.local_rank,
+            find_unused_parameters=False  # OptimizedNetwork uses all parameters
+        )
+        if args.rank == 0:
+            print(f"Using DDP with {args.world_size} GPUs")
+    # Fallback to DataParallel (legacy support)
+    elif torch.cuda.is_available() and len(args.gpu_idx) >= 2:
         opt_model = torch.nn.DataParallel(opt_model, device_ids=args.gpu_idx)
-        print(f"Using multiple GPUs: {args.gpu_idx}")
+        print(f"Using DataParallel with GPUs: {args.gpu_idx}")
     else:
         if device.type == "cuda":
             print(f"Using single GPU: cuda:{args.gpu_idx[0]}")
@@ -262,7 +310,9 @@ def discover_pareto_architectures(args, model, dataset):
         model: Trained supernet
         dataset: Dataset for evaluation
     """
-    device = set_device(args.gpu_idx)
+    # Set device (use local_rank for DDP if available)
+    local_rank = getattr(args, 'local_rank', None)
+    device = set_device(args.gpu_idx, local_rank=local_rank)
 
     # Load LUTs for all hardware
     lut_dir = Path(getattr(args, 'lut_dir', './hyundai/latency/luts'))

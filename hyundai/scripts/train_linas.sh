@@ -20,7 +20,11 @@
 # Environment
 SEEDS=(0)
 DATA='all'
-GPU='0'
+
+# GPU Configuration for DDP
+# Specify which GPUs to use (comma-separated, no spaces)
+VISIBLE_GPUS="0,1"  # Use GPU 0 and 1
+NUM_GPUS=2          # Number of GPUs to use
 
 # Data Settings
 DATA_DIR='./dataset/image'
@@ -28,7 +32,7 @@ RESIZE=128
 TEST_RATIO=0.2
 
 # Training Settings
-BATCH_SIZE=128
+BATCH_SIZE=64
 ALPHA_LR=0.001
 W_LR=0.001
 OPT_LR=0.001
@@ -109,14 +113,19 @@ run_pareto() {
         exit 1
     fi
 
-    $PYTHON hyundai/main.py \
+    # Launch with torchrun for DDP
+    CUDA_VISIBLE_DEVICES=$VISIBLE_GPUS torchrun \
+        --nnodes=1 \
+        --nproc_per_node=$NUM_GPUS \
+        --master_addr=localhost \
+        --master_port=29500 \
+        hyundai/main.py \
         --seed $SEED \
         --mode pareto \
         --data $DATA \
         --data_dir $DATA_DIR \
         --resize $RESIZE \
         --ratios $TEST_RATIO \
-        --gpu_idx $GPU \
         --alpha_lr $ALPHA_LR \
         --train_size $BATCH_SIZE \
         --test_size $BATCH_SIZE \
@@ -156,14 +165,19 @@ run_single() {
         exit 1
     fi
 
-    $PYTHON hyundai/main.py \
+    # Launch with torchrun for DDP
+    CUDA_VISIBLE_DEVICES=$VISIBLE_GPUS torchrun \
+        --nnodes=1 \
+        --nproc_per_node=$NUM_GPUS \
+        --master_addr=localhost \
+        --master_port=29500 \
+        hyundai/main.py \
         --seed $SEED \
         --mode nas \
         --data $DATA \
         --data_dir $DATA_DIR \
         --resize $RESIZE \
         --ratios $TEST_RATIO \
-        --gpu_idx $GPU \
         --alpha_lr $ALPHA_LR \
         --train_size $BATCH_SIZE \
         --test_size $BATCH_SIZE \

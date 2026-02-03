@@ -2,8 +2,8 @@
 # Lab conda versions:
 # torch==1.13.1+cu117
 # torchvision==0.14.1+cu117
-torch==1.13.1+cu117
-torchvision==0.14.1+cu117
+torch
+torchvision
 numpy
 pandas
 Pillow

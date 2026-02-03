@@ -1,5 +1,9 @@
 import json
+import warnings
 import wandb
+
+# Suppress PyTorch internal deprecation warnings
+warnings.filterwarnings("ignore", message=".*_all_gather_base.*")
 
 from datetime import datetime
 from utils.argument import get_args
@@ -21,6 +25,11 @@ def main():
     import setproctitle
     setproctitle.setproctitle('hyundai/hspark')
     args = get_args()
+
+    # Initialize distributed training if launched with torchrun
+    from utils.distributed import init_distributed_mode
+    init_distributed_mode(args)
+
     set_seed(args.seed)
 
     data_name = args.data if isinstance(args.data, str) else "_".join(args.data)
@@ -42,7 +51,13 @@ def main():
 
     # Include optimization mode in run name
     run_name = f"hyundai_seed{args.seed}_{opt_mode}_λ{lambda_val}_{search_space}"
-    wandb.init(config=args, project="Seg-NAS", entity="hopo55", name=run_name)
+
+    # Initialize wandb only on rank 0
+    if not hasattr(args, 'rank') or args.rank == 0:
+        wandb.init(config=args, project="Seg-NAS", entity="hopo55", name=run_name)
+    else:
+        import os
+        os.environ['WANDB_MODE'] = 'disabled'
 
     # Parse hardware targets if provided
     if hasattr(args, 'hardware_targets') and args.hardware_targets:
@@ -88,7 +103,8 @@ def main():
 
             train_searched_model(args, model, dataset)
 
-        wandb.finish()
+        if not hasattr(args, 'rank') or args.rank == 0:
+            wandb.finish()
 
     elif args.mode in ['nas', 'ind', 'zero']:
         # Search Architecture
@@ -115,12 +131,14 @@ def main():
             print("=" * 60)
             run_comparison(args, dataset)
 
-        wandb.finish()
+        if not hasattr(args, 'rank') or args.rank == 0:
+            wandb.finish()
 
     elif args.mode == 'hot':
         # Model Testing
         test_model(args, dataset)
-        wandb.finish()
+        if not hasattr(args, 'rank') or args.rank == 0:
+            wandb.finish()
 
 if __name__ == "__main__":
     main()

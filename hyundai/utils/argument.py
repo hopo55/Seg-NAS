@@ -23,8 +23,8 @@ def get_args():
     parser.add_argument('--ratios', type=float, default=0.2, 
                         help='Ratios for splitting train and test sets (default: 0.2)')
     # Training Argument
-    parser.add_argument('--gpu_idx', type=int, default=[0, 1], nargs='+', 
-                        help='use single GPU(e.g., --gpu_idx 0), or use multiple GPUs(e.g., --gpu_idx 0 1)')
+    parser.add_argument('--gpu_idx', type=int, default=[0], nargs='+',
+                        help='use single GPU(e.g., --gpu_idx 0), or use multiple GPUs(e.g., --gpu_idx 0 1). Ignored when using torchrun for DDP.')
     parser.add_argument('--alpha_lr', type=float, default=0.01, 
                         help='Learning rate for alpha used for architecture search (default: 0.01)')
     parser.add_argument('--train_size', type=int, default=64, 
@@ -93,8 +93,14 @@ def get_args():
                         help='Directory to save trained model checkpoints (default: ./checkpoints)')
     parser.add_argument('--log_dir', type=str, default='./logs',
                         help="Directory to save TensorBoard logs")
-    
-    # parser.add_argument('--resume', action='store_true', 
+
+    # Distributed training arguments
+    parser.add_argument('--dist-backend', default='nccl', type=str,
+                        help='Distributed backend (default: nccl)')
+    parser.add_argument('--dist-url', default='env://', type=str,
+                        help='URL used to set up distributed training (default: env://)')
+
+    # parser.add_argument('--resume', action='store_true',
     #                     help='Resume training from the last checkpoint if available')
 
     # args = parser.parse_args()

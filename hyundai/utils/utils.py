@@ -18,8 +18,21 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-def set_device(gpu_idx):
-    if torch.cuda.is_available():
+def set_device(gpu_idx, local_rank=None):
+    """
+    Set device for training.
+
+    Args:
+        gpu_idx: List of GPU indices (used for DataParallel or single GPU)
+        local_rank: Local rank for DDP (if distributed training)
+
+    Returns:
+        device: torch.device object
+    """
+    if local_rank is not None:  # DDP mode
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+    elif torch.cuda.is_available():  # DataParallel or single GPU
         torch.cuda.set_device(gpu_idx[0])
         device = torch.device(f"cuda:{gpu_idx[0]}")
     else:
@@ -47,6 +60,38 @@ class AverageMeter:
         self.sum += val * n
         self.count += n
         self.avg = self.sum / self.count
+
+    def synchronize_between_processes(self):
+        """
+        Synchronize metrics across all DDP processes.
+
+        Aggregates sum and count across all GPUs and recalculates the average.
+        Only has an effect when distributed training is active.
+        """
+        if not torch.distributed.is_available():
+            return
+        if not torch.distributed.is_initialized():
+            return
+
+        world_size = torch.distributed.get_world_size()
+        if world_size == 1:
+            return
+
+        # Convert to tensors on GPU
+        t_sum = torch.tensor([self.sum], dtype=torch.float64, device='cuda')
+        t_count = torch.tensor([self.count], dtype=torch.float64, device='cuda')
+
+        # Synchronize all processes
+        torch.distributed.barrier()
+
+        # All-reduce (sum across all processes)
+        torch.distributed.all_reduce(t_sum)
+        torch.distributed.all_reduce(t_count)
+
+        # Update with global values
+        self.sum = t_sum.item()
+        self.count = t_count.item()
+        self.avg = self.sum / self.count if self.count > 0 else 0
 
 def get_iou_score(outputs, labels):
     with torch.no_grad():

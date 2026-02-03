@@ -18,7 +18,8 @@ def train_warmup(model, train_loader, loss, optimizer_weight):
 
     train_loader = tqdm(train_loader, desc="Warmup", total=len(train_loader))
     for data, labels in train_loader:
-        data, labels = data.cuda(), labels.cuda()
+        device = next(model.parameters()).device
+        data, labels = data.to(device, non_blocking=True), labels.to(device, non_blocking=True)
         batch_size = data.size(0)
         optimizer_weight.zero_grad()
         outputs = model(data)
@@ -56,7 +57,8 @@ def train_weight_alpha(
 
     train_loader = tqdm(train_loader, desc="Train Weight", total=len(train_loader))
     for data, labels in train_loader:
-        data, labels = data.cuda(), labels.cuda()
+        device = next(model.parameters()).device
+        data, labels = data.to(device, non_blocking=True), labels.to(device, non_blocking=True)
         batch_size = data.size(0)
         optimizer_weight.zero_grad()
         outputs = model(data)
@@ -74,7 +76,8 @@ def train_weight_alpha(
     train_a_flops = AverageMeter()
     val_loader = tqdm(val_loader, desc="Train Alpha", total=len(val_loader))
     for data, labels in val_loader:
-        data, labels = data.cuda(), labels.cuda()
+        device = next(model.parameters()).device
+        data, labels = data.to(device, non_blocking=True), labels.to(device, non_blocking=True)
         batch_size = data.size(0)
         optimizer_alpha.zero_grad()
         outputs = model(data)
@@ -177,7 +180,8 @@ def train_weight_alpha_with_latency(
     # Phase 1: Train weights
     train_loader_iter = tqdm(train_loader, desc="Train Weight", total=len(train_loader))
     for data, labels in train_loader_iter:
-        data, labels = data.cuda(), labels.cuda()
+        device = next(model.parameters()).device
+        data, labels = data.to(device, non_blocking=True), labels.to(device, non_blocking=True)
         batch_size = data.size(0)
         optimizer_weight.zero_grad()
         outputs = model(data)
@@ -195,14 +199,15 @@ def train_weight_alpha_with_latency(
     # Phase 2: Train alpha with latency constraints
     val_loader_iter = tqdm(val_loader, desc="Train Alpha (Latency)", total=len(val_loader))
     for data, labels in val_loader_iter:
-        data, labels = data.cuda(), labels.cuda()
+        device = next(model.parameters()).device
+        data, labels = data.to(device, non_blocking=True), labels.to(device, non_blocking=True)
         batch_size = data.size(0)
         optimizer_alpha.zero_grad()
         outputs = model(data)
         ce_loss = loss(outputs, labels)
 
         # Get architecture encoding
-        if isinstance(model, torch.nn.DataParallel):
+        if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
             module = model.module
         else:
             module = model
@@ -331,9 +336,62 @@ def train_architecture_with_latency(
         hardware_targets: Target latencies per hardware (optional)
     """
     train_dataset, val_dataset, test_dataset, _ = dataset
-    train_loader = DataLoader(train_dataset, batch_size=args.train_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=args.train_size, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=args.test_size, shuffle=False)
+
+    # Create samplers for DDP
+    from torch.utils.data.distributed import DistributedSampler
+    if hasattr(args, 'distributed') and args.distributed:
+        train_sampler = DistributedSampler(
+            train_dataset,
+            num_replicas=args.world_size,
+            rank=args.rank,
+            shuffle=True,
+            drop_last=True
+        )
+        val_sampler = DistributedSampler(
+            val_dataset,
+            num_replicas=args.world_size,
+            rank=args.rank,
+            shuffle=False,
+            drop_last=True
+        )
+        test_sampler = DistributedSampler(
+            test_dataset,
+            num_replicas=args.world_size,
+            rank=args.rank,
+            shuffle=False
+        )
+        shuffle_train = False
+    else:
+        train_sampler = None
+        val_sampler = None
+        test_sampler = None
+        shuffle_train = True
+
+    # Create DataLoaders with samplers and performance optimizations
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.train_size,
+        shuffle=shuffle_train,
+        sampler=train_sampler,
+        num_workers=4,
+        pin_memory=True
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=args.train_size,
+        shuffle=False,
+        sampler=val_sampler,
+        num_workers=4,
+        pin_memory=True
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=args.test_size,
+        shuffle=False,
+        sampler=test_sampler,
+        num_workers=4,
+        pin_memory=True
+    )
 
     best_test_iou = -float('inf')
 
@@ -342,6 +400,9 @@ def train_architecture_with_latency(
 
     print("Warmup training has started...")
     for epoch in range(args.warmup_epochs):
+        # Set epoch for DistributedSampler (critical for proper shuffling)
+        if hasattr(args, 'distributed') and args.distributed:
+            train_sampler.set_epoch(epoch)
         train_loss, train_iou = train_warmup(model, train_loader, loss, optimizer_weight)
         test_iou = test_architecture(model, test_loader)
 
@@ -396,12 +457,22 @@ def train_architecture_with_latency(
 
         if test_iou > best_test_iou:
             best_test_iou = test_iou
-            save_path = os.path.join(args.save_dir, f'best_architecture.pt')
-            os.makedirs(args.save_dir, exist_ok=True)
-            torch.save(model.state_dict(), save_path)
+
+            # Only rank 0 saves checkpoints
+            if not hasattr(args, 'rank') or args.rank == 0:
+                save_path = os.path.join(args.save_dir, f'best_architecture.pt')
+                os.makedirs(args.save_dir, exist_ok=True)
+
+                # Unwrap DDP if needed
+                if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+                    model_to_save = model.module
+                else:
+                    model_to_save = model
+
+                torch.save(model_to_save.state_dict(), save_path)
 
         # Log alpha values
-        if isinstance(model, torch.nn.DataParallel):
+        if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
             alphas = model.module.get_alphas()
             search_space = model.module.search_space
         else:
@@ -462,7 +533,8 @@ def test_architecture(model, test_loader):
     test_loader = tqdm(test_loader, desc="Test", total=len(test_loader))
     with torch.no_grad():
         for data, labels in test_loader:
-            data, labels = data.cuda(), labels.cuda()
+            device = next(model.parameters()).device
+            data, labels = data.to(device, non_blocking=True), labels.to(device, non_blocking=True)
             batch_size = data.size(0)
             outputs = model(data)
             test_iou.update(get_iou_score(outputs, labels), batch_size)
@@ -480,16 +552,69 @@ def train_architecture(
     optimizer_weight,
 ):
     train_dataset, val_dataset, test_dataset, _ = dataset
-    train_loader = DataLoader(train_dataset, batch_size=args.train_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=args.train_size, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=args.test_size, shuffle=False)
+
+    # Create samplers for DDP
+    from torch.utils.data.distributed import DistributedSampler
+    if hasattr(args, 'distributed') and args.distributed:
+        train_sampler = DistributedSampler(
+            train_dataset,
+            num_replicas=args.world_size,
+            rank=args.rank,
+            shuffle=True,
+            drop_last=True
+        )
+        val_sampler = DistributedSampler(
+            val_dataset,
+            num_replicas=args.world_size,
+            rank=args.rank,
+            shuffle=False,
+            drop_last=True
+        )
+        test_sampler = DistributedSampler(
+            test_dataset,
+            num_replicas=args.world_size,
+            rank=args.rank,
+            shuffle=False
+        )
+        shuffle_train = False
+    else:
+        train_sampler = None
+        val_sampler = None
+        test_sampler = None
+        shuffle_train = True
+
+    # Create DataLoaders with samplers and performance optimizations
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.train_size,
+        shuffle=shuffle_train,
+        sampler=train_sampler,
+        num_workers=4,
+        pin_memory=True
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=args.train_size,
+        shuffle=False,
+        sampler=val_sampler,
+        num_workers=4,
+        pin_memory=True
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=args.test_size,
+        shuffle=False,
+        sampler=test_sampler,
+        num_workers=4,
+        pin_memory=True
+    )
 
     best_test_iou = -float('inf')
 
     # Initialize FLOPs normalization base once (using argmax FLOPs)
     if getattr(args, "flops_norm_base", None) is None:
         with torch.no_grad():
-            if isinstance(model, torch.nn.DataParallel):
+            if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
                 base_flops = model.module.get_argmax_flops(args.resize)
             else:
                 base_flops = model.get_argmax_flops(args.resize)
@@ -501,6 +626,10 @@ def train_architecture(
 
     print("Warmup training has started...")
     for epoch in range(args.warmup_epochs):
+        # Set epoch for DistributedSampler (critical for proper shuffling)
+        if hasattr(args, 'distributed') and args.distributed:
+            train_sampler.set_epoch(epoch)
+
         train_loss, train_iou = train_warmup(model, train_loader, loss, optimizer_weight)
         test_iou = test_architecture(model, test_loader)
 
@@ -531,6 +660,11 @@ def train_architecture(
             print(f"Multi-objective NAS enabled with flops_lambda={args.flops_lambda}")
 
     for epoch in range(args.warmup_epochs, args.epochs):
+        # Set epoch for DistributedSampler (critical for proper shuffling)
+        if hasattr(args, 'distributed') and args.distributed:
+            train_sampler.set_epoch(epoch)
+            val_sampler.set_epoch(epoch)
+
         train_w_loss, train_w_iou, train_a_loss, train_a_iou, train_a_flops = (
             train_weight_alpha(
                 args,
@@ -547,12 +681,22 @@ def train_architecture(
 
         if test_iou > best_test_iou:
             best_test_iou = test_iou  # Update the best IoU
-            save_path = os.path.join(args.save_dir, f'best_architecture.pt')
-            os.makedirs(args.save_dir, exist_ok=True)
-            torch.save(model.state_dict(), save_path)  # Save the model
+
+            # Only rank 0 saves checkpoints
+            if not hasattr(args, 'rank') or args.rank == 0:
+                save_path = os.path.join(args.save_dir, f'best_architecture.pt')
+                os.makedirs(args.save_dir, exist_ok=True)
+
+                # Unwrap DDP if needed
+                if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+                    model_to_save = model.module
+                else:
+                    model_to_save = model
+
+                torch.save(model_to_save.state_dict(), save_path)  # Save the model
 
         # Log alpha values during training for visualization
-        if isinstance(model, torch.nn.DataParallel):
+        if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
             alphas = model.module.get_alphas()
             search_space = model.module.search_space
         else:

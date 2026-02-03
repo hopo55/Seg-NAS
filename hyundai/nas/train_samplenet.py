@@ -36,8 +36,8 @@ def train_opt(model, train_loader, loss, optimizer):
 
 # test samplenet
 def test_opt(model, test_loader):
-    if isinstance(model, torch.nn.DataParallel):
-        model.module.eval()  # DataParallel을 사용 중인 경우
+    if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
+        model.module.eval()  # DataParallel/DDP를 사용 중인 경우
     else:
         model.eval()
     test_iou = AverageMeter()
@@ -60,7 +60,7 @@ def train_samplenet(
     optimizer,
 ):
     device = set_device(args.gpu_idx)
-    if isinstance(model, torch.nn.DataParallel):
+    if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
         model.module.to(device)
     else:
         model.to(device)
@@ -84,30 +84,33 @@ def train_samplenet(
         if test_iou > best_test_iou:
             best_test_iou = test_iou  # Update the best IoU
             best_model = copy.deepcopy(model)
-            save_path = os.path.join(args.save_dir, f'best_model.pt')
 
-            if isinstance(best_model, torch.nn.DataParallel):
-                torch.save({
-                    'model_state_dict': best_model.module.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'epoch': epoch,
-                    'best_test_iou': best_test_iou,
-                    'model': best_model.module,  # Save the model structure
-                }, save_path)
-            else:
-                torch.save({
-                    'model_state_dict': best_model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'epoch': epoch,
-                    'best_test_iou': best_test_iou,
-                    'model': best_model,  # Save the model structure
-                }, save_path)
+            # Only rank 0 saves checkpoints
+            if not hasattr(args, 'rank') or args.rank == 0:
+                save_path = os.path.join(args.save_dir, f'best_model.pt')
 
-            # Save args.txt to log_dir when best_model.pt is saved
-            os.makedirs(args.log_dir, exist_ok=True)
-            args_text = "\n".join([f"{arg}: {value}" for arg, value in vars(args).items()])
-            with open(os.path.join(args.log_dir, 'args.txt'), 'w') as f:
-                f.write(args_text)
+                if isinstance(best_model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
+                    torch.save({
+                        'model_state_dict': best_model.module.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'epoch': epoch,
+                        'best_test_iou': best_test_iou,
+                        'model': best_model.module,  # Save the model structure
+                    }, save_path)
+                else:
+                    torch.save({
+                        'model_state_dict': best_model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'epoch': epoch,
+                        'best_test_iou': best_test_iou,
+                        'model': best_model,  # Save the model structure
+                    }, save_path)
+
+                # Save args.txt to log_dir when best_model.pt is saved
+                os.makedirs(args.log_dir, exist_ok=True)
+                args_text = "\n".join([f"{arg}: {value}" for arg, value in vars(args).items()])
+                with open(os.path.join(args.log_dir, 'args.txt'), 'w') as f:
+                    f.write(args_text)
 
         # Log training and test metrics to wandb
         wandb.log({
