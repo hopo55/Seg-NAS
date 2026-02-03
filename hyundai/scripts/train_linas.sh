@@ -26,6 +26,16 @@ DATA='all'
 VISIBLE_GPUS="0,1"  # Use GPU 0 and 1
 NUM_GPUS=2          # Number of GPUs to use
 
+# CPU thread settings per process (avoid oversubscription)
+# Rule of thumb: total physical cores / number of processes
+CPU_CORES=$(nproc)
+THREADS_PER_PROC=$((CPU_CORES / NUM_GPUS))
+if [ "$THREADS_PER_PROC" -lt 1 ]; then
+    THREADS_PER_PROC=1
+fi
+export OMP_NUM_THREADS=$THREADS_PER_PROC
+export MKL_NUM_THREADS=$THREADS_PER_PROC
+
 # Data Settings
 DATA_DIR='./dataset/image'
 RESIZE=128
