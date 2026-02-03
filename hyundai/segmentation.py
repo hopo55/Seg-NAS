@@ -32,8 +32,6 @@ def search_architecture(args, dataset):
 
     # Distributed training setup
     if hasattr(args, 'distributed') and args.distributed:
-        # Convert BatchNorm to SyncBatchNorm for DDP
-        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
         # Wrap with DDP
         model = torch.nn.parallel.DistributedDataParallel(
             model,
@@ -108,8 +106,6 @@ def search_architecture_linas(args, dataset):
 
     # Distributed training setup
     if hasattr(args, 'distributed') and args.distributed:
-        # Convert BatchNorm to SyncBatchNorm for DDP
-        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
         # Wrap with DDP
         model = torch.nn.parallel.DistributedDataParallel(
             model,
@@ -212,7 +208,7 @@ def train_searched_model(args, opt_model, dataset):
     device = set_device(args.gpu_idx, local_rank=local_rank)
 
     # Extract architecture description before creating OptimizedNetwork
-    if isinstance(opt_model, torch.nn.DataParallel):
+    if isinstance(opt_model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
         supernet = opt_model.module
     else:
         supernet = opt_model
@@ -231,28 +227,28 @@ def train_searched_model(args, opt_model, dataset):
     wandb.run.summary['Selected Architecture'] = arch_text
 
     # Also log as individual metrics for easier filtering
-    for i, layer_desc in enumerate(arch_desc, 1):
-        wandb.run.summary[f'Architecture/Layer{i}'] = layer_desc
+    # Only rank 0 logs to wandb
+    if not hasattr(args, 'rank') or args.rank == 0:
+        for i, layer_desc in enumerate(arch_desc, 1):
+            wandb.run.summary[f'Architecture/Layer{i}'] = layer_desc
 
-    # Log alpha values for detailed analysis
-    alphas = supernet.get_alphas()
-    if supernet.search_space == 'extended':
-        for i, alpha_dict in enumerate(alphas, 1):
-            wandb.log({
-                f'Final_Alphas/deconv{i}_op': alpha_dict['op'],
-                f'Final_Alphas/deconv{i}_width': alpha_dict['width']
-            })
-    else:
-        for i, alpha_list in enumerate(alphas, 1):
-            wandb.log({f'Final_Alphas/deconv{i}': alpha_list})
+        # Log alpha values for detailed analysis
+        alphas = supernet.get_alphas()
+        if supernet.search_space == 'extended':
+            for i, alpha_dict in enumerate(alphas, 1):
+                wandb.log({
+                    f'Final_Alphas/deconv{i}_op': alpha_dict['op'],
+                    f'Final_Alphas/deconv{i}_width': alpha_dict['width']
+                })
+        else:
+            for i, alpha_list in enumerate(alphas, 1):
+                wandb.log({f'Final_Alphas/deconv{i}': alpha_list})
 
     opt_model = OptimizedNetwork(opt_model)
     opt_model = opt_model.to(device)
 
     # Distributed training setup
     if hasattr(args, 'distributed') and args.distributed:
-        # Convert BatchNorm to SyncBatchNorm for DDP
-        opt_model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(opt_model)
         # Wrap with DDP
         opt_model = torch.nn.parallel.DistributedDataParallel(
             opt_model,
@@ -275,12 +271,13 @@ def train_searched_model(args, opt_model, dataset):
     # Measure FLOPs and Parameters for Pareto analysis
     gflops, params_m = get_model_complexity(opt_model, input_size=(1, 3, args.resize, args.resize), device=device)
     print(f"OptimizedNetwork - FLOPs: {gflops:.4f} GFLOPs, Parameters: {params_m:.4f} M")
-    wandb.log({
-        'Model/FLOPs (GFLOPs)': gflops,
-        'Model/Parameters (M)': params_m
-    })
-    wandb.run.summary['Model/Final FLOPs (GFLOPs)'] = gflops
-    wandb.run.summary['Model/Final Parameters (M)'] = params_m
+    if not hasattr(args, 'rank') or args.rank == 0:
+        wandb.log({
+            'Model/FLOPs (GFLOPs)': gflops,
+            'Model/Parameters (M)': params_m
+        })
+        wandb.run.summary['Model/Final FLOPs (GFLOPs)'] = gflops
+        wandb.run.summary['Model/Final Parameters (M)'] = params_m
 
     loss = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(opt_model.parameters(), lr=args.opt_lr)
@@ -395,13 +392,14 @@ def discover_pareto_architectures(args, model, dataset):
                 print(f"  Ops:      {arch.op_indices}")
                 print(f"  Widths:   {arch.width_indices}")
 
-                # Log to wandb
-                wandb.log({
-                    f'Pareto/{hw}/accuracy': arch.accuracy,
-                    f'Pareto/{hw}/latency_ms': actual_lat,
-                    f'Pareto/{hw}/target_ms': target_lat,
-                    f'Pareto/{hw}/meets_target': actual_lat <= target_lat
-                })
+                # Log to wandb (only rank 0)
+                if not hasattr(args, 'rank') or args.rank == 0:
+                    wandb.log({
+                        f'Pareto/{hw}/accuracy': arch.accuracy,
+                        f'Pareto/{hw}/latency_ms': actual_lat,
+                        f'Pareto/{hw}/target_ms': target_lat,
+                        f'Pareto/{hw}/meets_target': actual_lat <= target_lat
+                    })
 
     print("\n" + "=" * 70)
 

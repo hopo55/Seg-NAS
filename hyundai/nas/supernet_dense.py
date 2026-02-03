@@ -280,7 +280,7 @@ class OptimizedNetwork(nn.Module):
     def __init__(self, super_net):
         super(OptimizedNetwork, self).__init__()
 
-        if isinstance(super_net, torch.nn.DataParallel):
+        if isinstance(super_net, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
             module = super_net.module
         else:
             module = super_net

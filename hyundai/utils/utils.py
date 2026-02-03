@@ -152,8 +152,8 @@ def get_model_complexity(model, input_size=(1, 3, 128, 128), device='cuda'):
     """
     from thop import profile, clever_format
 
-    # Handle DataParallel
-    if isinstance(model, torch.nn.DataParallel):
+    # Handle DataParallel and DDP
+    if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
         model_to_profile = model.module
     else:
         model_to_profile = model
@@ -187,8 +187,8 @@ def measure_inference_time(model, input_size=(1, 3, 128, 128), device='cuda',
         mean_time: Mean inference time in milliseconds
         std_time: Standard deviation of inference time in milliseconds
     """
-    # Handle DataParallel
-    if isinstance(model, torch.nn.DataParallel):
+    # Handle DataParallel and DDP
+    if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
         model_to_measure = model.module
     else:
         model_to_measure = model

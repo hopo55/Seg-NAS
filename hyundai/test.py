@@ -6,8 +6,8 @@ from utils.dataloaders import set_transforms, HotDataset
 
 
 def test_hotstamping(model, test_hot_loader):
-    if isinstance(model, torch.nn.DataParallel):
-        model.module.eval()  # DataParallel을 사용 중인 경우
+    if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
+        model.module.eval()  # DataParallel 또는 DDP를 사용 중인 경우
     else:
         model.eval()
     test_iou = AverageMeter()

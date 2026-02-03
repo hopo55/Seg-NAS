@@ -85,7 +85,7 @@ def train_weight_alpha(
 
         # Multi-objective: Add FLOPs penalty using Gumbel-Softmax sampling
         # This gives FLOPs closer to actual selected operation (not weighted average)
-        if isinstance(model, torch.nn.DataParallel):
+        if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
             sampled_flops = model.module.get_sampled_flops(args.resize)
             argmax_flops = model.module.get_argmax_flops(args.resize)
         else:
@@ -121,7 +121,7 @@ def train_weight_alpha(
         nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
         optimizer_alpha.step()
 
-        if isinstance(model, torch.nn.DataParallel):
+        if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
             model.module.clip_alphas()
         else:
             model.clip_alphas()
@@ -295,7 +295,7 @@ def train_weight_alpha_with_latency(
         nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
         optimizer_alpha.step()
 
-        if isinstance(model, torch.nn.DataParallel):
+        if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
             model.module.clip_alphas()
         else:
             model.clip_alphas()
@@ -406,12 +406,14 @@ def train_architecture_with_latency(
         train_loss, train_iou = train_warmup(model, train_loader, loss, optimizer_weight)
         test_iou = test_architecture(model, test_loader)
 
-        wandb.log({
-            'Architecture Warmup/Train_Loss': train_loss,
-            'Architecture Warmup/Train_mIoU': train_iou,
-            'Architecture Warmup/Test_mIoU': test_iou,
-            'epoch': epoch
-        })
+        # Only rank 0 logs to wandb
+        if not hasattr(args, 'rank') or args.rank == 0:
+            wandb.log({
+                'Architecture Warmup/Train_Loss': train_loss,
+                'Architecture Warmup/Train_mIoU': train_iou,
+                'Architecture Warmup/Test_mIoU': test_iou,
+                'epoch': epoch
+            })
 
         print(f"Epoch {epoch+1}/{args.warmup_epochs}, "
               f"Train Loss: {train_loss:.4f}, Train mIoU: {train_iou:.4f}, "
@@ -419,7 +421,8 @@ def train_architecture_with_latency(
 
     warmup_end_time = time.time()
     warmup_hours = (warmup_end_time - warmup_start_time) / 3600
-    wandb.log({'Search Cost/Warmup (GPU hours)': warmup_hours})
+    if not hasattr(args, 'rank') or args.rank == 0:
+        wandb.log({'Search Cost/Warmup (GPU hours)': warmup_hours})
     print(f"Warmup completed in {warmup_hours:.4f} GPU hours")
 
     # Search phase
@@ -491,16 +494,18 @@ def train_architecture_with_latency(
                 for j, val in enumerate(alpha_list):
                     alpha_log[f'Alphas/deconv{i}_op{j}'] = val
 
-        wandb.log({
-            'LINAS Train/Weight_Loss': train_w_loss,
-            'LINAS Train/Alpha_Loss': train_a_loss,
-            'LINAS Train/Weight_mIoU': train_w_iou,
-            'LINAS Train/Alpha_mIoU': train_a_iou,
-            'LINAS Train/Latency (ms)': train_latency,
-            'LINAS Test/Test_mIoU': test_iou,
-            'epoch': epoch,
-            **alpha_log
-        })
+        # Only rank 0 logs to wandb
+        if not hasattr(args, 'rank') or args.rank == 0:
+            wandb.log({
+                'LINAS Train/Weight_Loss': train_w_loss,
+                'LINAS Train/Alpha_Loss': train_a_loss,
+                'LINAS Train/Weight_mIoU': train_w_iou,
+                'LINAS Train/Alpha_mIoU': train_a_iou,
+                'LINAS Train/Latency (ms)': train_latency,
+                'LINAS Test/Test_mIoU': test_iou,
+                'epoch': epoch,
+                **alpha_log
+            })
 
         print(
             f"Epoch {epoch+1}/{args.epochs}\n"
@@ -514,18 +519,19 @@ def train_architecture_with_latency(
     search_end_time = time.time()
     search_hours = (search_end_time - search_start_time) / 3600
     total_search_hours = warmup_hours + search_hours
-    wandb.log({
-        'Search Cost/Search (GPU hours)': search_hours,
-        'Search Cost/Total Search (GPU hours)': total_search_hours,
-    })
+    if not hasattr(args, 'rank') or args.rank == 0:
+        wandb.log({
+            'Search Cost/Search (GPU hours)': search_hours,
+            'Search Cost/Total Search (GPU hours)': total_search_hours,
+        })
     print(f"\nSearch completed in {search_hours:.4f} GPU hours")
     print(f"Total search cost: {total_search_hours:.4f} GPU hours")
 
 
 # test search architecture
 def test_architecture(model, test_loader):
-    if isinstance(model, torch.nn.DataParallel):
-        model.module.eval()  # DataParallel을 사용 중인 경우
+    if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
+        model.module.eval()  # DataParallel 또는 DDP를 사용 중인 경우
     else:
         model.eval()
     test_iou = AverageMeter()
@@ -633,19 +639,22 @@ def train_architecture(
         train_loss, train_iou = train_warmup(model, train_loader, loss, optimizer_weight)
         test_iou = test_architecture(model, test_loader)
 
-        wandb.log({
-            'Architecuter Warmup/Train_Loss': train_loss,
-            'Architecuter Warmup/Train_mIoU': train_iou,
-            'Architecuter Warmup/Test_mIoU': test_iou,
-            'epoch': epoch
-        })
+        # Only rank 0 logs to wandb
+        if not hasattr(args, 'rank') or args.rank == 0:
+            wandb.log({
+                'Architecuter Warmup/Train_Loss': train_loss,
+                'Architecuter Warmup/Train_mIoU': train_iou,
+                'Architecuter Warmup/Test_mIoU': test_iou,
+                'epoch': epoch
+            })
 
         print(f"Epoch {epoch+1}/{args.epochs}, Train Loss: {train_loss:.4f}, Train IOU: {train_iou:.4f}, Test IOU: {test_iou:.4f}")
 
     # Log warmup time
     warmup_end_time = time.time()
     warmup_hours = (warmup_end_time - warmup_start_time) / 3600
-    wandb.log({'Search Cost/Warmup (GPU hours)': warmup_hours})
+    if not hasattr(args, 'rank') or args.rank == 0:
+        wandb.log({'Search Cost/Warmup (GPU hours)': warmup_hours})
     print(f"Warmup completed in {warmup_hours:.4f} GPU hours")
 
     # Track search phase time
@@ -719,16 +728,18 @@ def train_architecture(
                 for j, val in enumerate(alpha_list):
                     alpha_log[f'Alphas/deconv{i}_op{j}'] = val
 
-        wandb.log({
-            'Architecture Train/Weight_Loss': train_w_loss,
-            'Architecture Train/Alpha_Loss': train_a_loss,
-            'Architecture Train/Weight_mIoU': train_w_iou,
-            'Architecture Train/Alpha_mIoU': train_a_iou,
-            'Architecture Train/Selected_FLOPs (GFLOPs)': train_a_flops,
-            'Architecture Test/Test_mIoU': test_iou,
-            'epoch': epoch,
-            **alpha_log
-        })
+        # Only rank 0 logs to wandb
+        if not hasattr(args, 'rank') or args.rank == 0:
+            wandb.log({
+                'Architecture Train/Weight_Loss': train_w_loss,
+                'Architecture Train/Alpha_Loss': train_a_loss,
+                'Architecture Train/Weight_mIoU': train_w_iou,
+                'Architecture Train/Alpha_mIoU': train_a_iou,
+                'Architecture Train/Selected_FLOPs (GFLOPs)': train_a_flops,
+                'Architecture Test/Test_mIoU': test_iou,
+                'epoch': epoch,
+                **alpha_log
+            })
 
         print(
             f"Epoch {epoch+1}/{args.epochs}\n"
@@ -741,9 +752,10 @@ def train_architecture(
     search_end_time = time.time()
     search_hours = (search_end_time - search_start_time) / 3600
     total_search_hours = warmup_hours + search_hours
-    wandb.log({
-        'Search Cost/Search (GPU hours)': search_hours,
-        'Search Cost/Total Search (GPU hours)': total_search_hours,
-    })
+    if not hasattr(args, 'rank') or args.rank == 0:
+        wandb.log({
+            'Search Cost/Search (GPU hours)': search_hours,
+            'Search Cost/Total Search (GPU hours)': total_search_hours,
+        })
     print(f"Search completed in {search_hours:.4f} GPU hours")
     print(f"Total search cost: {total_search_hours:.4f} GPU hours")
