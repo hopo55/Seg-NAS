@@ -104,7 +104,11 @@ class ParetoSearcher:
 
         elif strategy == 'alpha_guided':
             # Sample based on learned alpha weights (higher alpha = higher probability)
-            op_weights, width_weights = self.supernet.get_alpha_weights()
+            if hasattr(self.supernet, 'module'):
+                module = self.supernet.module
+            else:
+                module = self.supernet
+            op_weights, width_weights = module.get_alpha_weights()
             op_probs = F.softmax(op_weights * 2, dim=-1).cpu().numpy()  # Temperature 0.5
             width_probs = F.softmax(width_weights * 2, dim=-1).cpu().numpy()
 
