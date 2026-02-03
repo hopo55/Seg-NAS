@@ -196,6 +196,14 @@ class ParetoSearcher:
             outputs = self.supernet(images)
             preds = torch.argmax(outputs, dim=1)
 
+            # Convert masks to class indices if needed
+            if masks.dim() == 4:
+                if masks.size(1) == 1:
+                    masks = masks.squeeze(1)
+                else:
+                    # Assume one-hot/probability mask: [B, C, H, W] -> [B, H, W]
+                    masks = torch.argmax(masks, dim=1)
+
             # Calculate IoU
             intersection = ((preds == 1) & (masks == 1)).sum().float()
             union = ((preds == 1) | (masks == 1)).sum().float()
