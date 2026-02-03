@@ -329,8 +329,19 @@ def discover_pareto_architectures(args, model, dataset):
         raise RuntimeError("No LUT files found. Run measure_latency.sh first.")
 
     # Create validation loader
+    if isinstance(dataset, dict):
+        val_dataset = dataset.get('valid') or dataset.get('val')
+        if val_dataset is None:
+            raise KeyError("Expected dataset dict to have 'valid' or 'val' key.")
+    elif isinstance(dataset, (list, tuple)):
+        if len(dataset) < 2:
+            raise ValueError("Expected dataset tuple/list with at least (train, val, ...).")
+        val_dataset = dataset[1]
+    else:
+        raise TypeError(f"Unsupported dataset type: {type(dataset).__name__}")
+
     val_loader = torch.utils.data.DataLoader(
-        dataset['valid'],
+        val_dataset,
         batch_size=args.test_size,
         shuffle=False,
         num_workers=4,
