@@ -11,6 +11,11 @@ from nas.train_supernet import train_architecture, train_architecture_with_laten
 from nas.train_samplenet import train_samplenet
 from nas.pareto_search import ParetoSearcher, print_pareto_summary
 
+
+def _wandb_active(args) -> bool:
+    return getattr(wandb, 'run', None) is not None and (not hasattr(args, 'rank') or args.rank == 0)
+
+
 def search_architecture(args, dataset):
     # Set device (use local_rank for DDP if available)
     local_rank = getattr(args, 'local_rank', None)
@@ -250,11 +255,10 @@ def train_searched_model(args, opt_model, dataset):
 
     # Log to wandb as a summary (appears in Overview tab)
     arch_text = "\n".join(arch_desc)
-    wandb.run.summary['Selected Architecture'] = arch_text
+    if _wandb_active(args):
+        wandb.run.summary['Selected Architecture'] = arch_text
 
-    # Also log as individual metrics for easier filtering
-    # Only rank 0 logs to wandb
-    if not hasattr(args, 'rank') or args.rank == 0:
+        # Also log as individual metrics for easier filtering
         for i, layer_desc in enumerate(arch_desc, 1):
             wandb.run.summary[f'Architecture/Layer{i}'] = layer_desc
 
@@ -297,7 +301,7 @@ def train_searched_model(args, opt_model, dataset):
     # Measure FLOPs and Parameters for Pareto analysis
     gflops, params_m = get_model_complexity(opt_model, input_size=(1, 3, args.resize, args.resize), device=device)
     print(f"OptimizedNetwork - FLOPs: {gflops:.4f} GFLOPs, Parameters: {params_m:.4f} M")
-    if not hasattr(args, 'rank') or args.rank == 0:
+    if _wandb_active(args):
         wandb.log({
             'Model/FLOPs (GFLOPs)': gflops,
             'Model/Parameters (M)': params_m
@@ -430,7 +434,7 @@ def discover_pareto_architectures(args, model, dataset):
                 print(f"  Widths:   {arch.width_indices}")
 
                 # Log to wandb (only rank 0)
-                if not hasattr(args, 'rank') or args.rank == 0:
+                if _wandb_active(args):
                     wandb.log({
                         f'Pareto/{hw}/accuracy': arch.accuracy,
                         f'Pareto/{hw}/latency_ms': actual_lat,
