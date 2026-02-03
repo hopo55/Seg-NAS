@@ -6,6 +6,7 @@ import wandb
 import torch
 import torch.nn as nn
 from torch.utils.data import ConcatDataset, DataLoader
+from tqdm import tqdm
 from utils.dataloaders import set_transforms, ImageDataset
 
 from utils.utils import AverageMeter, get_iou_score, measure_inference_time, set_device
@@ -59,7 +60,8 @@ def train_samplenet(
     loss,
     optimizer,
 ):
-    device = set_device(args.gpu_idx)
+    local_rank = getattr(args, 'local_rank', None)
+    device = set_device(args.gpu_idx, local_rank=local_rank)
     if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
         model.module.to(device)
     else:
@@ -77,9 +79,25 @@ def train_samplenet(
     retrain_start_time = time.time()
 
     print("SampleNet training has started...")
+    show_pbar = (not hasattr(args, 'rank')) or args.rank == 0
     for epoch in range(args.epochs):
-        train_loss, train_iou = train_opt(model, train_loader, loss, optimizer)
-        test_iou = test_opt(model, test_loader)
+        train_iter = tqdm(
+            train_loader,
+            desc=f"SampleNet Train {epoch+1}/{args.epochs}",
+            total=len(train_loader),
+            leave=False,
+            dynamic_ncols=True,
+        ) if show_pbar else train_loader
+        test_iter = tqdm(
+            test_loader,
+            desc=f"SampleNet Test {epoch+1}/{args.epochs}",
+            total=len(test_loader),
+            leave=False,
+            dynamic_ncols=True,
+        ) if show_pbar else test_loader
+
+        train_loss, train_iou = train_opt(model, train_iter, loss, optimizer)
+        test_iou = test_opt(model, test_iter)
 
         if test_iou > best_test_iou:
             best_test_iou = test_iou  # Update the best IoU
