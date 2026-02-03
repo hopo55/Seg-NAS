@@ -38,12 +38,26 @@ class Architecture:
         if self.latencies is None:
             self.latencies = {}
 
+    @staticmethod
+    def _to_builtin(value):
+        if isinstance(value, (np.integer,)):
+            return int(value)
+        if isinstance(value, (np.floating,)):
+            return float(value)
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, list):
+            return [Architecture._to_builtin(v) for v in value]
+        if isinstance(value, dict):
+            return {k: Architecture._to_builtin(v) for k, v in value.items()}
+        return value
+
     def to_dict(self):
         return {
-            'op_indices': self.op_indices,
-            'width_indices': self.width_indices,
-            'accuracy': self.accuracy,
-            'latencies': self.latencies
+            'op_indices': self._to_builtin(self.op_indices),
+            'width_indices': self._to_builtin(self.width_indices),
+            'accuracy': self._to_builtin(self.accuracy),
+            'latencies': self._to_builtin(self.latencies)
         }
 
     @classmethod
