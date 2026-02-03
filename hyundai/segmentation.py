@@ -166,13 +166,39 @@ def search_architecture_linas(args, dataset):
         if hardware_targets:
             print(f"Hardware targets: {hardware_targets}")
 
-    # Option 2: Single-hardware LUT
+    # Option 2: Single-hardware LUT (explicit path)
     lut_path = getattr(args, 'lut_path', None)
     if lut_path and Path(lut_path).exists() and latency_predictor is None:
         print(f"Loading latency LUT from: {lut_path}")
         from latency import LatencyLUT
         latency_lut = LatencyLUT(lut_path)
         print(f"LUT hardware: {latency_lut.hardware_name}")
+
+    # Option 3: Single-hardware LUT (directory + primary hardware)
+    if latency_lut is None and latency_predictor is None:
+        lut_dir = getattr(args, 'lut_dir', None)
+        if lut_dir:
+            lut_dir_path = Path(lut_dir)
+            if lut_dir_path.exists():
+                primary_hw = getattr(args, 'primary_hardware', None)
+                candidate = None
+                if primary_hw:
+                    candidate = lut_dir_path / f"lut_{primary_hw.lower()}.json"
+                    if not candidate.exists():
+                        print(f"Warning: LUT not found for primary_hardware={primary_hw}: {candidate}")
+                        candidate = None
+
+                if candidate is None:
+                    lut_files = sorted(lut_dir_path.glob("lut_*.json"))
+                    if lut_files:
+                        candidate = lut_files[0]
+                        print(f"Using first available LUT in {lut_dir_path}: {candidate.name}")
+
+                if candidate is not None and candidate.exists():
+                    print(f"Loading latency LUT from: {candidate}")
+                    from latency import LatencyLUT
+                    latency_lut = LatencyLUT(str(candidate))
+                    print(f"LUT hardware: {latency_lut.hardware_name}")
 
     # Print optimization mode
     if latency_predictor is not None:
