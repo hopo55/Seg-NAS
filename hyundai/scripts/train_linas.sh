@@ -52,7 +52,9 @@ W_EPOCHS=1
 EPOCHS=2
 
 # Search Space
-SEARCH_SPACE='extended'
+#   - extended: standard 5 ops x 3 widths
+#   - industry: standard + industry-specific ops x 3 widths
+SEARCH_SPACE='industry'
 
 # LINAS Settings
 LATENCY_LAMBDA=1.0
@@ -67,6 +69,7 @@ HARDWARE_TARGETS[JetsonOrin]=95 # Edge device (tight constraint)
 # Pareto search settings
 PARETO_SAMPLES=1000     # Number of architectures to sample
 PARETO_EVAL_SUBSET=100  # Number to actually evaluate
+PARETO_REFINE_TOPK=5    # Re-evaluate top-k as extracted subnet before final pick
 
 # LUT directory
 LUT_DIR='./hyundai/latency/luts'
@@ -79,6 +82,32 @@ MODE_ARG=${1:-pareto}
 # =============================================================================
 
 PYTHON=${PYTHON:-python3}
+
+validate_lut_for_search_space() {
+    local LUT_PATH=$1
+    local SEARCH_SPACE_NAME=$2
+
+    $PYTHON - "$LUT_PATH" "$SEARCH_SPACE_NAME" <<'PY'
+import json
+import sys
+
+lut_path = sys.argv[1]
+search_space = sys.argv[2]
+required = ['Conv3x3', 'Conv5x5', 'Conv7x7', 'DWSep3x3', 'DWSep5x5']
+if search_space == 'industry':
+    required += ['EdgeConv', 'DilatedDWSep']
+
+with open(lut_path, 'r') as f:
+    lut = json.load(f)
+
+for layer_name, layer_info in lut.get('layers', {}).items():
+    ops = layer_info.get('ops', {})
+    for op in required:
+        if not any(key.startswith(op + '_w') for key in ops.keys()):
+            print(f\"Missing op '{op}' in {lut_path} ({layer_name})\")
+            sys.exit(1)
+PY
+}
 
 build_hardware_targets_json() {
     local json="{"
@@ -112,6 +141,11 @@ run_pareto() {
     for HW in A6000 RTX3090 RTX4090 JetsonOrin; do
         local LUT_PATH="${LUT_DIR}/lut_${HW,,}.json"
         if [ -f "$LUT_PATH" ]; then
+            if ! validate_lut_for_search_space "$LUT_PATH" "$SEARCH_SPACE"; then
+                echo "Error: LUT does not match search space '$SEARCH_SPACE': $LUT_PATH"
+                echo "Please regenerate LUTs with measure_latency.sh"
+                exit 1
+            fi
             ((LUT_COUNT++))
             echo "  Found LUT: $LUT_PATH"
         fi
@@ -152,6 +186,7 @@ run_pareto() {
         --hardware_targets "$HW_TARGETS" \
         --pareto_samples $PARETO_SAMPLES \
         --pareto_eval_subset $PARETO_EVAL_SUBSET \
+        --pareto_refine_topk $PARETO_REFINE_TOPK \
         --primary_hardware JetsonOrin
 }
 
@@ -172,6 +207,11 @@ run_single() {
     if [ ! -f "$LUT_PATH" ]; then
         echo "Error: LUT file not found: $LUT_PATH"
         echo "Please run measure_latency.sh on $HARDWARE first"
+        exit 1
+    fi
+    if ! validate_lut_for_search_space "$LUT_PATH" "$SEARCH_SPACE"; then
+        echo "Error: LUT does not match search space '$SEARCH_SPACE': $LUT_PATH"
+        echo "Please regenerate LUTs with measure_latency.sh"
         exit 1
     fi
 

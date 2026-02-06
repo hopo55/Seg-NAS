@@ -40,7 +40,7 @@ def load_folder_cycle(data_dir, ratios):
 
 
 # Split data into train, validation, and test sets based on car model.
-def load_folder_model(data_dir, ratios, names):
+def load_folder_model(data_dir, ratios, names, train_val_split=0.8):
     if names == ['all']:
         names = ["CE", "DF", "GN7 일반", "GN7 파노라마"]
     else:
@@ -63,6 +63,10 @@ def load_folder_model(data_dir, ratios, names):
             if name in folder:
                 car_model[name].append(folder)
 
+    train_val_split = float(train_val_split)
+    if not (0.0 < train_val_split < 1.0):
+        raise ValueError(f"train_val_split must be in (0, 1), got {train_val_split}")
+
     for folders in car_model.values():
         random.shuffle(folders)
         total = len(folders)
@@ -73,7 +77,12 @@ def load_folder_model(data_dir, ratios, names):
         test_ind_folders.append(folders[train_end:])
 
         train_valid_total = len(train_and_valid)
-        train_split_end = int(train_valid_total * 0.5)
+        if train_valid_total <= 1:
+            train_folders.extend(train_and_valid)
+            continue
+
+        train_split_end = int(train_valid_total * train_val_split)
+        train_split_end = max(1, min(train_split_end, train_valid_total - 1))
 
         train_folders.extend(train_and_valid[:train_split_end])
         valid_folders.extend(train_and_valid[train_split_end:])

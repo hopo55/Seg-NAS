@@ -51,8 +51,13 @@ def get_args():
     parser.add_argument('--flops_norm_base', type=float, default=None,
                         help='Normalize expected FLOPs by this base (GFLOPs). If None, use initial expected FLOPs.')
     parser.add_argument('--search_space', type=str, default='basic',
-                        choices=['basic', 'extended'],
-                        help='Search space type: basic (5 ops, 3125 archs) or extended (5 ops x 3 widths, 759375 archs)')
+                        choices=['basic', 'extended', 'industry'],
+                        help='Search space type: basic (5 ops, 3125 archs), '
+                             'extended (5 ops x 3 widths, 759375 archs), '
+                             'or industry (7 ops x 3 widths, 4084101 archs)')
+    parser.add_argument('--train_val_split', type=float, default=0.8,
+                        help='Train ratio within train+val pool after test split '
+                             '(e.g., 0.8 => 80%% train, 20%% val)')
 
     # LINAS: Latency-aware NAS arguments
     parser.add_argument('--use_latency', action='store_true',
@@ -81,6 +86,8 @@ def get_args():
                         help='Number of architectures to sample for Pareto discovery (default: 1000)')
     parser.add_argument('--pareto_eval_subset', type=int, default=100,
                         help='Number of architectures to actually evaluate with weight-sharing (default: 100)')
+    parser.add_argument('--pareto_refine_topk', type=int, default=5,
+                        help='Top-k Pareto candidates to re-evaluate as extracted subnet for final selection (default: 5)')
 
     # Comparison arguments
     parser.add_argument('--comparison', action='store_true',

@@ -10,6 +10,15 @@ from typing import Dict, Optional
 
 from utils.utils import AverageMeter, get_iou_score
 
+
+def _is_main_process(args) -> bool:
+    return (not hasattr(args, 'rank')) or args.rank == 0
+
+
+def _sync_meter(meter: AverageMeter):
+    meter.synchronize_between_processes()
+
+
 # train warmup
 def train_warmup(model, train_loader, loss, optimizer_weight):
     model.train()
@@ -256,9 +265,8 @@ def train_weight_alpha_with_latency(
             current_latency = module.get_argmax_latency(latency_lut)
 
             if target_latency is not None and target_latency > 0:
-                # Target-based: penalize deviation from target
-                lat_diff = torch.abs(sampled_latency - target_latency)
-                latency_penalty = args.latency_lambda * lat_diff
+                # Constraint-based: penalize only target violation
+                latency_penalty = args.latency_lambda * F.relu(sampled_latency - target_latency)
             else:
                 # Minimize latency
                 latency_penalty = args.latency_lambda * sampled_latency
@@ -393,7 +401,7 @@ def train_architecture_with_latency(
         pin_memory=True
     )
 
-    best_test_iou = -float('inf')
+    best_val_iou = -float('inf')
 
     # Track GPU hours
     warmup_start_time = time.time()
@@ -404,24 +412,24 @@ def train_architecture_with_latency(
         if hasattr(args, 'distributed') and args.distributed:
             train_sampler.set_epoch(epoch)
         train_loss, train_iou = train_warmup(model, train_loader, loss, optimizer_weight)
-        test_iou = test_architecture(model, test_loader)
+        val_iou = test_architecture(model, val_loader, desc="Warmup Val")
 
         # Only rank 0 logs to wandb
-        if not hasattr(args, 'rank') or args.rank == 0:
+        if _is_main_process(args):
             wandb.log({
                 'Architecture Warmup/Train_Loss': train_loss,
                 'Architecture Warmup/Train_mIoU': train_iou,
-                'Architecture Warmup/Test_mIoU': test_iou,
+                'Architecture Warmup/Val_mIoU': val_iou,
                 'epoch': epoch
             })
 
         print(f"Epoch {epoch+1}/{args.warmup_epochs}, "
               f"Train Loss: {train_loss:.4f}, Train mIoU: {train_iou:.4f}, "
-              f"Test mIoU: {test_iou:.4f}")
+              f"Val mIoU: {val_iou:.4f}")
 
     warmup_end_time = time.time()
     warmup_hours = (warmup_end_time - warmup_start_time) / 3600
-    if not hasattr(args, 'rank') or args.rank == 0:
+    if _is_main_process(args):
         wandb.log({'Search Cost/Warmup (GPU hours)': warmup_hours})
     print(f"Warmup completed in {warmup_hours:.4f} GPU hours")
 
@@ -456,13 +464,13 @@ def train_architecture_with_latency(
             )
         )
 
-        test_iou = test_architecture(model, test_loader)
+        val_iou = test_architecture(model, val_loader, desc="Search Val")
 
-        if test_iou > best_test_iou:
-            best_test_iou = test_iou
+        if val_iou > best_val_iou:
+            best_val_iou = val_iou
 
             # Only rank 0 saves checkpoints
-            if not hasattr(args, 'rank') or args.rank == 0:
+            if _is_main_process(args):
                 save_path = os.path.join(args.save_dir, f'best_architecture.pt')
                 os.makedirs(args.save_dir, exist_ok=True)
 
@@ -483,7 +491,7 @@ def train_architecture_with_latency(
             search_space = model.search_space
 
         alpha_log = {}
-        if search_space == 'extended':
+        if search_space in ('extended', 'industry'):
             for i, alpha_dict in enumerate(alphas, 1):
                 for j, val in enumerate(alpha_dict['op']):
                     alpha_log[f'Alphas/deconv{i}_op{j}'] = val
@@ -495,14 +503,14 @@ def train_architecture_with_latency(
                     alpha_log[f'Alphas/deconv{i}_op{j}'] = val
 
         # Only rank 0 logs to wandb
-        if not hasattr(args, 'rank') or args.rank == 0:
+        if _is_main_process(args):
             wandb.log({
                 'LINAS Train/Weight_Loss': train_w_loss,
                 'LINAS Train/Alpha_Loss': train_a_loss,
                 'LINAS Train/Weight_mIoU': train_w_iou,
                 'LINAS Train/Alpha_mIoU': train_a_iou,
                 'LINAS Train/Latency (ms)': train_latency,
-                'LINAS Test/Test_mIoU': test_iou,
+                'LINAS Val/Val_mIoU': val_iou,
                 'epoch': epoch,
                 **alpha_log
             })
@@ -512,14 +520,14 @@ def train_architecture_with_latency(
             f"[Train W] Loss: {train_w_loss:.4f}, mIoU: {train_w_iou:.4f}\n"
             f"[Train A] Loss: {train_a_loss:.4f}, mIoU: {train_a_iou:.4f}, "
             f"Latency: {train_latency:.2f}ms\n"
-            f"[Test] mIoU: {test_iou:.4f}"
+            f"[Val] mIoU: {val_iou:.4f}"
         )
 
     # Log search time
     search_end_time = time.time()
     search_hours = (search_end_time - search_start_time) / 3600
     total_search_hours = warmup_hours + search_hours
-    if not hasattr(args, 'rank') or args.rank == 0:
+    if _is_main_process(args):
         wandb.log({
             'Search Cost/Search (GPU hours)': search_hours,
             'Search Cost/Total Search (GPU hours)': total_search_hours,
@@ -527,16 +535,41 @@ def train_architecture_with_latency(
     print(f"\nSearch completed in {search_hours:.4f} GPU hours")
     print(f"Total search cost: {total_search_hours:.4f} GPU hours")
 
+    # Restore best supernet (selected on validation only), then report test once
+    if hasattr(args, 'distributed') and args.distributed:
+        torch.distributed.barrier()
+    best_path = os.path.join(args.save_dir, 'best_architecture.pt')
+    if os.path.exists(best_path):
+        model_to_load = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
+        state_dict = torch.load(best_path, map_location=next(model_to_load.parameters()).device)
+        model_to_load.load_state_dict(state_dict)
+
+    final_test_iou = test_architecture(model, test_loader, desc="Final Test")
+    if _is_main_process(args):
+        wandb.log({
+            'LINAS Val/Best_mIoU': best_val_iou,
+            'LINAS Test/Final_mIoU': final_test_iou,
+        })
+    print(f"[Final Test] mIoU: {final_test_iou:.4f}")
+
 
 # test search architecture
-def test_architecture(model, test_loader):
+def test_architecture(model, test_loader, desc="Eval"):
     if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
         model.module.eval()  # DataParallel 또는 DDP를 사용 중인 경우
     else:
         model.eval()
     test_iou = AverageMeter()
-    
-    test_loader = tqdm(test_loader, desc="Test", total=len(test_loader))
+
+    # Only rank 0 shows tqdm in distributed mode
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        show_pbar = torch.distributed.get_rank() == 0
+    else:
+        show_pbar = True
+
+    if show_pbar:
+        test_loader = tqdm(test_loader, desc=desc, total=len(test_loader))
+
     with torch.no_grad():
         for data, labels in test_loader:
             device = next(model.parameters()).device
@@ -544,7 +577,10 @@ def test_architecture(model, test_loader):
             batch_size = data.size(0)
             outputs = model(data)
             test_iou.update(get_iou_score(outputs, labels), batch_size)
-            test_loader.set_postfix(iou=f"{test_iou.avg:.4f}")
+            if show_pbar:
+                test_loader.set_postfix(iou=f"{test_iou.avg:.4f}")
+
+    _sync_meter(test_iou)
 
     return test_iou.avg
 
@@ -615,7 +651,7 @@ def train_architecture(
         pin_memory=True
     )
 
-    best_test_iou = -float('inf')
+    best_val_iou = -float('inf')
 
     # Initialize FLOPs normalization base once (using argmax FLOPs)
     if getattr(args, "flops_norm_base", None) is None:
@@ -637,23 +673,23 @@ def train_architecture(
             train_sampler.set_epoch(epoch)
 
         train_loss, train_iou = train_warmup(model, train_loader, loss, optimizer_weight)
-        test_iou = test_architecture(model, test_loader)
+        val_iou = test_architecture(model, val_loader, desc="Warmup Val")
 
         # Only rank 0 logs to wandb
-        if not hasattr(args, 'rank') or args.rank == 0:
+        if _is_main_process(args):
             wandb.log({
                 'Architecuter Warmup/Train_Loss': train_loss,
                 'Architecuter Warmup/Train_mIoU': train_iou,
-                'Architecuter Warmup/Test_mIoU': test_iou,
+                'Architecuter Warmup/Val_mIoU': val_iou,
                 'epoch': epoch
             })
 
-        print(f"Epoch {epoch+1}/{args.epochs}, Train Loss: {train_loss:.4f}, Train IOU: {train_iou:.4f}, Test IOU: {test_iou:.4f}")
+        print(f"Epoch {epoch+1}/{args.epochs}, Train Loss: {train_loss:.4f}, Train IOU: {train_iou:.4f}, Val IOU: {val_iou:.4f}")
 
     # Log warmup time
     warmup_end_time = time.time()
     warmup_hours = (warmup_end_time - warmup_start_time) / 3600
-    if not hasattr(args, 'rank') or args.rank == 0:
+    if _is_main_process(args):
         wandb.log({'Search Cost/Warmup (GPU hours)': warmup_hours})
     print(f"Warmup completed in {warmup_hours:.4f} GPU hours")
 
@@ -686,13 +722,13 @@ def train_architecture(
             )
         )
 
-        test_iou = test_architecture(model, test_loader)
+        val_iou = test_architecture(model, val_loader, desc="Search Val")
 
-        if test_iou > best_test_iou:
-            best_test_iou = test_iou  # Update the best IoU
+        if val_iou > best_val_iou:
+            best_val_iou = val_iou  # Update the best IoU
 
             # Only rank 0 saves checkpoints
-            if not hasattr(args, 'rank') or args.rank == 0:
+            if _is_main_process(args):
                 save_path = os.path.join(args.save_dir, f'best_architecture.pt')
                 os.makedirs(args.save_dir, exist_ok=True)
 
@@ -713,7 +749,7 @@ def train_architecture(
             search_space = model.search_space
 
         alpha_log = {}
-        if search_space == 'extended':
+        if search_space in ('extended', 'industry'):
             # For extended search space, log operation and width alphas separately
             for i, alpha_dict in enumerate(alphas, 1):
                 # Log operation alphas
@@ -729,14 +765,14 @@ def train_architecture(
                     alpha_log[f'Alphas/deconv{i}_op{j}'] = val
 
         # Only rank 0 logs to wandb
-        if not hasattr(args, 'rank') or args.rank == 0:
+        if _is_main_process(args):
             wandb.log({
                 'Architecture Train/Weight_Loss': train_w_loss,
                 'Architecture Train/Alpha_Loss': train_a_loss,
                 'Architecture Train/Weight_mIoU': train_w_iou,
                 'Architecture Train/Alpha_mIoU': train_a_iou,
                 'Architecture Train/Selected_FLOPs (GFLOPs)': train_a_flops,
-                'Architecture Test/Test_mIoU': test_iou,
+                'Architecture Val/Val_mIoU': val_iou,
                 'epoch': epoch,
                 **alpha_log
             })
@@ -745,17 +781,34 @@ def train_architecture(
             f"Epoch {epoch+1}/{args.epochs}\n"
             f"[Train W] Weight Loss: {train_w_loss:.4f}, Weight mIoU: {train_w_iou:.4f}\n"
             f"[Train A] Alpha Loss: {train_a_loss:.4f}, Alpha mIoU: {train_a_iou:.4f}, Selected FLOPs: {train_a_flops:.4f} GFLOPs\n"
-            f"[Test] mIoU: {test_iou:.4f}"
+            f"[Val] mIoU: {val_iou:.4f}"
         )
 
     # Log search time
     search_end_time = time.time()
     search_hours = (search_end_time - search_start_time) / 3600
     total_search_hours = warmup_hours + search_hours
-    if not hasattr(args, 'rank') or args.rank == 0:
+    if _is_main_process(args):
         wandb.log({
             'Search Cost/Search (GPU hours)': search_hours,
             'Search Cost/Total Search (GPU hours)': total_search_hours,
         })
     print(f"Search completed in {search_hours:.4f} GPU hours")
     print(f"Total search cost: {total_search_hours:.4f} GPU hours")
+
+    # Restore best supernet selected on validation only, then report test once
+    if hasattr(args, 'distributed') and args.distributed:
+        torch.distributed.barrier()
+    best_path = os.path.join(args.save_dir, 'best_architecture.pt')
+    if os.path.exists(best_path):
+        model_to_load = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
+        state_dict = torch.load(best_path, map_location=next(model_to_load.parameters()).device)
+        model_to_load.load_state_dict(state_dict)
+
+    final_test_iou = test_architecture(model, test_loader, desc="Final Test")
+    if _is_main_process(args):
+        wandb.log({
+            'Architecture Val/Best_mIoU': best_val_iou,
+            'Architecture Test/Final_mIoU': final_test_iou,
+        })
+    print(f"[Final Test] mIoU: {final_test_iou:.4f}")

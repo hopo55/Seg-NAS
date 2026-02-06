@@ -5,15 +5,75 @@ from pathlib import Path
 import json
 
 import wandb
-from utils.utils import set_device, check_tensor_in_list, get_model_complexity
+from utils.utils import set_device, check_tensor_in_list, get_model_complexity, AverageMeter, get_iou_score
 from nas.supernet_dense import SuperNet, OptimizedNetwork
 from nas.train_supernet import train_architecture, train_architecture_with_latency
 from nas.train_samplenet import train_samplenet
 from nas.pareto_search import ParetoSearcher, print_pareto_summary
+from nas.search_space import STANDARD_OP_NAMES, ALL_OP_NAMES, WIDTH_MULTS, calculate_search_space_size
 
 
 def _wandb_active(args) -> bool:
     return getattr(wandb, 'run', None) is not None and (not hasattr(args, 'rank') or args.rank == 0)
+
+
+def _describe_search_space(search_space: str):
+    if search_space == 'industry':
+        op_names = ALL_OP_NAMES
+        width_mults = WIDTH_MULTS
+    elif search_space == 'extended':
+        op_names = STANDARD_OP_NAMES
+        width_mults = WIDTH_MULTS
+    else:
+        op_names = STANDARD_OP_NAMES
+        width_mults = [1.0]
+    return op_names, width_mults
+
+
+@torch.no_grad()
+def _evaluate_extracted_subnet(supernet_model, arch, val_loader, device):
+    """Evaluate an extracted subnet (argmax-fixed architecture) on validation set."""
+    if isinstance(supernet_model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
+        module = supernet_model.module
+    else:
+        module = supernet_model
+
+    deconvs = [module.deconv1, module.deconv2, module.deconv3, module.deconv4, module.deconv5]
+    saved = []
+    for deconv in deconvs:
+        if hasattr(deconv, 'alphas_op'):
+            saved.append((deconv.alphas_op.detach().clone(), deconv.alphas_width.detach().clone()))
+        else:
+            saved.append((deconv.alphas.detach().clone(), None))
+
+    for i, deconv in enumerate(deconvs):
+        if hasattr(deconv, 'alphas_op'):
+            deconv.alphas_op.data.fill_(-10)
+            deconv.alphas_op.data[arch.op_indices[i]] = 10
+            deconv.alphas_width.data.fill_(-10)
+            deconv.alphas_width.data[arch.width_indices[i]] = 10
+        else:
+            deconv.alphas.data.fill_(-10)
+            deconv.alphas.data[arch.op_indices[i]] = 10
+
+    subnet = OptimizedNetwork(supernet_model).to(device)
+    subnet.eval()
+    meter = AverageMeter()
+    for images, labels in val_loader:
+        images = images.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
+        outputs = subnet(images)
+        meter.update(get_iou_score(outputs, labels), images.size(0))
+
+    # Restore supernet alpha state
+    for deconv, state in zip(deconvs, saved):
+        if hasattr(deconv, 'alphas_op'):
+            deconv.alphas_op.data.copy_(state[0])
+            deconv.alphas_width.data.copy_(state[1])
+        else:
+            deconv.alphas.data.copy_(state[0])
+
+    return meter.avg
 
 
 def search_architecture(args, dataset):
@@ -24,14 +84,14 @@ def search_architecture(args, dataset):
     # Create SuperNet with specified search space
     search_space = getattr(args, 'search_space', 'basic')
     model = SuperNet(n_class=2, search_space=search_space)
+    op_names, width_mults = _describe_search_space(search_space)
     print(f"Search space: {search_space}")
-    if search_space == 'extended':
-        print("  - 5 operations (Conv3x3, Conv5x5, Conv7x7, DWSep3x3, DWSep5x5)")
-        print("  - 3 width multipliers (0.5x, 0.75x, 1.0x)")
-        print("  - Total: 5^5 x 3^5 = 759,375 architectures")
+    print(f"  - {len(op_names)} operations: {', '.join(op_names)}")
+    if search_space in ('extended', 'industry'):
+        print(f"  - {len(width_mults)} width multipliers: {list(width_mults)}")
+        print(f"  - Total: {calculate_search_space_size(op_names, list(width_mults)):,} architectures")
     else:
-        print("  - 5 operations (Conv3x3, Conv5x5, Conv7x7, DWSep3x3, DWSep5x5)")
-        print("  - Total: 5^5 = 3,125 architectures")
+        print(f"  - Total: {calculate_search_space_size(op_names, [1.0]):,} architectures")
 
     model = model.to(device)
 
@@ -98,14 +158,16 @@ def search_architecture_linas(args, dataset):
     local_rank = getattr(args, 'local_rank', None)
     device = set_device(args.gpu_idx, local_rank=local_rank)
 
-    # Create SuperNet (extended search space required for latency)
-    search_space = 'extended'  # LINAS requires extended search space
+    # Create SuperNet (width-aware search space required for latency)
+    search_space = getattr(args, 'search_space', 'industry')
+    if search_space == 'basic':
+        raise ValueError("LINAS requires width-aware search space ('extended' or 'industry').")
     model = SuperNet(n_class=2, search_space=search_space)
-
+    op_names, width_mults = _describe_search_space(search_space)
     print(f"LINAS Search Space: {search_space}")
-    print("  - 5 operations (Conv3x3, Conv5x5, Conv7x7, DWSep3x3, DWSep5x5)")
-    print("  - 3 width multipliers (0.5x, 0.75x, 1.0x)")
-    print("  - Total: 759,375 architectures")
+    print(f"  - {len(op_names)} operations: {', '.join(op_names)}")
+    print(f"  - {len(width_mults)} width multipliers: {list(width_mults)}")
+    print(f"  - Total: {calculate_search_space_size(op_names, list(width_mults)):,} architectures")
 
     model = model.to(device)
 
@@ -161,8 +223,11 @@ def search_architecture_linas(args, dataset):
     if predictor_path and Path(predictor_path).exists():
         print(f"Loading latency predictor from: {predictor_path}")
         from latency import CrossHardwareLatencyPredictor
-        latency_predictor = CrossHardwareLatencyPredictor()
-        latency_predictor.load_state_dict(torch.load(predictor_path))
+        latency_predictor = CrossHardwareLatencyPredictor(
+            num_ops=len(op_names),
+            num_widths=len(width_mults)
+        )
+        latency_predictor.load_state_dict(torch.load(predictor_path, map_location=device))
         latency_predictor = latency_predictor.to(device)
         latency_predictor.eval()
 
@@ -244,6 +309,14 @@ def train_searched_model(args, opt_model, dataset):
     else:
         supernet = opt_model
 
+    # Use validation-selected supernet weights if checkpoint exists.
+    best_ckpt = Path(args.save_dir) / 'best_architecture.pt'
+    if hasattr(args, 'distributed') and args.distributed:
+        torch.distributed.barrier()
+    if best_ckpt.exists():
+        state_dict = torch.load(best_ckpt, map_location=device)
+        supernet.load_state_dict(state_dict)
+
     # Log final selected architecture
     arch_desc = supernet.get_arch_description()
     print("\n" + "=" * 60)
@@ -264,7 +337,7 @@ def train_searched_model(args, opt_model, dataset):
 
         # Log alpha values for detailed analysis
         alphas = supernet.get_alphas()
-        if supernet.search_space == 'extended':
+        if supernet.search_space in ('extended', 'industry'):
             for i, alpha_dict in enumerate(alphas, 1):
                 wandb.log({
                     f'Final_Alphas/deconv{i}_op': alpha_dict['op'],
@@ -420,16 +493,39 @@ def discover_pareto_architectures(args, model, dataset):
     print("SELECTED ARCHITECTURES FOR TARGET LATENCIES")
     print("=" * 70)
 
+    refine_topk = max(1, int(getattr(args, 'pareto_refine_topk', 1)))
+    if refine_topk > 1:
+        print(f"Refinement: evaluating top-{refine_topk} Pareto candidates as extracted subnets")
+
     selected_archs = {}
     for hw, target_lat in hardware_targets.items():
         if hw in luts:
-            arch = searcher.select_architecture(hw, target_lat, prefer='accuracy')
+            pareto_candidates = list(searcher.pareto_front.get(hw, []))
+            valid_candidates = [
+                cand for cand in pareto_candidates
+                if cand.latencies.get(hw, float('inf')) <= target_lat
+            ]
+            if not valid_candidates:
+                valid_candidates = pareto_candidates[:1]
+
+            valid_candidates = sorted(valid_candidates, key=lambda a: a.accuracy, reverse=True)
+            shortlist = valid_candidates[:refine_topk]
+
+            arch = None
+            best_refined = -float('inf')
+            for cand in shortlist:
+                refined_val_iou = _evaluate_extracted_subnet(model, cand, val_loader, device)
+                if refined_val_iou > best_refined:
+                    best_refined = refined_val_iou
+                    arch = cand
+
             if arch:
                 selected_archs[hw] = arch
                 actual_lat = arch.latencies.get(hw, 0)
                 print(f"\n{hw} (target: {target_lat}ms):")
                 print(f"  Accuracy: {arch.accuracy:.4f}")
                 print(f"  Latency:  {actual_lat:.2f}ms")
+                print(f"  Refined Val mIoU: {best_refined:.4f}")
                 print(f"  Ops:      {arch.op_indices}")
                 print(f"  Widths:   {arch.width_indices}")
 
@@ -437,6 +533,7 @@ def discover_pareto_architectures(args, model, dataset):
                 if _wandb_active(args):
                     wandb.log({
                         f'Pareto/{hw}/accuracy': arch.accuracy,
+                        f'Pareto/{hw}/refined_val_mIoU': best_refined,
                         f'Pareto/{hw}/latency_ms': actual_lat,
                         f'Pareto/{hw}/target_ms': target_lat,
                         f'Pareto/{hw}/meets_target': actual_lat <= target_lat

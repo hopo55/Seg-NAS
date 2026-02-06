@@ -3,7 +3,8 @@ import torch
 from torch import nn
 from torchvision.models import DenseNet121_Weights, densenet121
 
-from utils.operations import MixedOp, MixedOpWithWidth, DepthwiseSeparableConvTranspose2d
+from utils.operations import MixedOp, MixedOpWithWidth
+from nas.search_space import STANDARD_OP_NAMES, ALL_OP_NAMES, WIDTH_MULTS
 
 ranges = {
     "densenet": ((0, 3), (4, 6), (6, 8), (8, 10), (10, 12)),
@@ -33,7 +34,7 @@ class SuperNet(nn.Module):
 
     Args:
         n_class: number of output classes
-        search_space: 'basic' (5 ops) or 'extended' (5 ops x 3 widths = 15 choices)
+        search_space: 'basic', 'extended', or 'industry'
     """
     def __init__(self, n_class, search_space='basic'):
         super().__init__()
@@ -41,22 +42,33 @@ class SuperNet(nn.Module):
         self.search_space = search_space
         self.pretrained_net = DenseNet()
 
-        if search_space == 'extended':
-            # Extended search space with width multiplier
-            # Total: 5^5 x 3^5 = 759,375 architectures
-            self.deconv1 = MixedOpWithWidth(1024, 512)
-            self.deconv2 = MixedOpWithWidth(512, 256)
-            self.deconv3 = MixedOpWithWidth(256, 128)
-            self.deconv4 = MixedOpWithWidth(128, 64)
-            self.deconv5 = MixedOpWithWidth(64, 32)
+        if search_space == 'industry':
+            # Industry search space: 7 ops x 3 widths
+            self.op_names = list(ALL_OP_NAMES)
+            self.width_mults = list(WIDTH_MULTS)
+            self.deconv1 = MixedOpWithWidth(1024, 512, op_names=self.op_names, width_mults=self.width_mults)
+            self.deconv2 = MixedOpWithWidth(512, 256, op_names=self.op_names, width_mults=self.width_mults)
+            self.deconv3 = MixedOpWithWidth(256, 128, op_names=self.op_names, width_mults=self.width_mults)
+            self.deconv4 = MixedOpWithWidth(128, 64, op_names=self.op_names, width_mults=self.width_mults)
+            self.deconv5 = MixedOpWithWidth(64, 32, op_names=self.op_names, width_mults=self.width_mults)
+        elif search_space == 'extended':
+            # Extended search space: 5 ops x 3 widths
+            self.op_names = list(STANDARD_OP_NAMES)
+            self.width_mults = list(WIDTH_MULTS)
+            self.deconv1 = MixedOpWithWidth(1024, 512, op_names=self.op_names, width_mults=self.width_mults)
+            self.deconv2 = MixedOpWithWidth(512, 256, op_names=self.op_names, width_mults=self.width_mults)
+            self.deconv3 = MixedOpWithWidth(256, 128, op_names=self.op_names, width_mults=self.width_mults)
+            self.deconv4 = MixedOpWithWidth(128, 64, op_names=self.op_names, width_mults=self.width_mults)
+            self.deconv5 = MixedOpWithWidth(64, 32, op_names=self.op_names, width_mults=self.width_mults)
         else:
             # Basic search space (5 operations only)
-            # Total: 5^5 = 3,125 architectures
-            self.deconv1 = MixedOp(1024, 512)
-            self.deconv2 = MixedOp(512, 256)
-            self.deconv3 = MixedOp(256, 128)
-            self.deconv4 = MixedOp(128, 64)
-            self.deconv5 = MixedOp(64, 32)
+            self.op_names = list(STANDARD_OP_NAMES)
+            self.width_mults = [1.0]
+            self.deconv1 = MixedOp(1024, 512, op_names=self.op_names)
+            self.deconv2 = MixedOp(512, 256, op_names=self.op_names)
+            self.deconv3 = MixedOp(256, 128, op_names=self.op_names)
+            self.deconv4 = MixedOp(128, 64, op_names=self.op_names)
+            self.deconv5 = MixedOp(64, 32, op_names=self.op_names)
 
         self.classifier = nn.Conv2d(32, n_class, kernel_size=1)
 
@@ -91,7 +103,7 @@ class SuperNet(nn.Module):
 
     def get_alphas(self):
         """Return alpha values for logging"""
-        if self.search_space == 'extended':
+        if self.search_space in ('extended', 'industry'):
             alpha_list = []
             for deconv in [self.deconv1, self.deconv2, self.deconv3, self.deconv4, self.deconv5]:
                 alpha_list.append({
@@ -111,7 +123,7 @@ class SuperNet(nn.Module):
 
     def get_alpha_params(self):
         """Return all alpha parameters for optimizer"""
-        if self.search_space == 'extended':
+        if self.search_space in ('extended', 'industry'):
             params = []
             for deconv in [self.deconv1, self.deconv2, self.deconv3, self.deconv4, self.deconv5]:
                 params.append(deconv.alphas_op)
@@ -188,7 +200,7 @@ class SuperNet(nn.Module):
         """
         deconvs = [self.deconv1, self.deconv2, self.deconv3, self.deconv4, self.deconv5]
 
-        if self.search_space == 'extended':
+        if self.search_space in ('extended', 'industry'):
             op_indices = []
             width_indices = []
             for deconv in deconvs:
@@ -199,7 +211,7 @@ class SuperNet(nn.Module):
         else:
             # Basic search space: only op indices, width is always 1.0
             op_indices = [deconv.get_max_alpha_idx() for deconv in deconvs]
-            width_indices = [2, 2, 2, 2, 2]  # Index 2 = width 1.0
+            width_indices = [len(WIDTH_MULTS) - 1] * len(deconvs)  # Index for width 1.0
             return torch.tensor(op_indices), torch.tensor(width_indices)
 
     def get_sampled_latency(self, latency_lut, temperature=1.0):
@@ -213,8 +225,8 @@ class SuperNet(nn.Module):
         Returns:
             Total latency in milliseconds (differentiable)
         """
-        if self.search_space != 'extended':
-            raise NotImplementedError("Latency sampling only supported for extended search space")
+        if self.search_space not in ('extended', 'industry'):
+            raise NotImplementedError("Latency sampling only supported for width-aware search spaces")
 
         deconvs = [self.deconv1, self.deconv2, self.deconv3, self.deconv4, self.deconv5]
 
@@ -236,8 +248,8 @@ class SuperNet(nn.Module):
         Returns:
             Total latency in milliseconds
         """
-        if self.search_space != 'extended':
-            raise NotImplementedError("Latency only supported for extended search space")
+        if self.search_space not in ('extended', 'industry'):
+            raise NotImplementedError("Latency only supported for width-aware search spaces")
 
         deconvs = [self.deconv1, self.deconv2, self.deconv3, self.deconv4, self.deconv5]
 
@@ -257,7 +269,7 @@ class SuperNet(nn.Module):
         """
         deconvs = [self.deconv1, self.deconv2, self.deconv3, self.deconv4, self.deconv5]
 
-        if self.search_space == 'extended':
+        if self.search_space in ('extended', 'industry'):
             op_weights = torch.stack([
                 torch.softmax(d.alphas_op, dim=0) for d in deconvs
             ])
@@ -270,8 +282,8 @@ class SuperNet(nn.Module):
                 torch.softmax(d.alphas, dim=0) for d in deconvs
             ])
             # For basic search space, width is always 1.0
-            width_weights = torch.zeros(5, 3)
-            width_weights[:, 2] = 1.0  # Index 2 = width 1.0
+            width_weights = op_weights.new_zeros((5, len(WIDTH_MULTS)))
+            width_weights[:, -1] = 1.0  # Last index = width 1.0
             return op_weights, width_weights
 
 
@@ -288,7 +300,7 @@ class OptimizedNetwork(nn.Module):
         self.search_space = getattr(module, 'search_space', 'basic')
         self.pretrained_net = copy.deepcopy(module.pretrained_net)
 
-        if self.search_space == 'extended':
+        if self.search_space in ('extended', 'industry'):
             # For extended search space, we need to extract op + bn + optional projection
             self._setup_extended_deconv(module)
         else:

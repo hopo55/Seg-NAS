@@ -1,11 +1,10 @@
 import os
 import time
-import copy
 import gc
 import wandb
 import torch
 import torch.nn as nn
-from torch.utils.data import ConcatDataset, DataLoader
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 from utils.dataloaders import set_transforms, ImageDataset
 
@@ -51,6 +50,7 @@ def test_opt(model, test_loader):
             outputs = model(data)
             test_iou.update(get_iou_score(outputs, labels), batch_size)
 
+    test_iou.synchronize_between_processes()
     return test_iou.avg
 
 def train_samplenet(
@@ -68,12 +68,61 @@ def train_samplenet(
         model.to(device)
 
     train_dataset, val_dataset, test_dataset, test_ind_data = dataset
-    train_dataset = ConcatDataset([train_dataset, val_dataset])
-    train_loader = DataLoader(train_dataset, batch_size=args.train_size, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=args.test_size, shuffle=False)
+    from torch.utils.data.distributed import DistributedSampler
+    if hasattr(args, 'distributed') and args.distributed:
+        train_sampler = DistributedSampler(
+            train_dataset,
+            num_replicas=args.world_size,
+            rank=args.rank,
+            shuffle=True,
+            drop_last=True
+        )
+        val_sampler = DistributedSampler(
+            val_dataset,
+            num_replicas=args.world_size,
+            rank=args.rank,
+            shuffle=False
+        )
+        test_sampler = DistributedSampler(
+            test_dataset,
+            num_replicas=args.world_size,
+            rank=args.rank,
+            shuffle=False
+        )
+        shuffle_train = False
+    else:
+        train_sampler = None
+        val_sampler = None
+        test_sampler = None
+        shuffle_train = True
 
-    best_model = None
-    best_test_iou = -float('inf')
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.train_size,
+        shuffle=shuffle_train,
+        sampler=train_sampler,
+        num_workers=4,
+        pin_memory=True
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=args.test_size,
+        shuffle=False,
+        sampler=val_sampler,
+        num_workers=4,
+        pin_memory=True
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=args.test_size,
+        shuffle=False,
+        sampler=test_sampler,
+        num_workers=4,
+        pin_memory=True
+    )
+
+    best_model_state = None
+    best_val_iou = -float('inf')
 
     # Track retrain time
     retrain_start_time = time.time()
@@ -81,6 +130,9 @@ def train_samplenet(
     print("SampleNet training has started...")
     show_pbar = (not hasattr(args, 'rank')) or args.rank == 0
     for epoch in range(args.epochs):
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
+
         train_iter = tqdm(
             train_loader,
             desc=f"SampleNet Train {epoch+1}/{args.epochs}",
@@ -89,39 +141,41 @@ def train_samplenet(
             dynamic_ncols=True,
         ) if show_pbar else train_loader
         test_iter = tqdm(
-            test_loader,
-            desc=f"SampleNet Test {epoch+1}/{args.epochs}",
-            total=len(test_loader),
+            val_loader,
+            desc=f"SampleNet Val {epoch+1}/{args.epochs}",
+            total=len(val_loader),
             leave=False,
             dynamic_ncols=True,
-        ) if show_pbar else test_loader
+        ) if show_pbar else val_loader
 
         train_loss, train_iou = train_opt(model, train_iter, loss, optimizer)
-        test_iou = test_opt(model, test_iter)
+        val_iou = test_opt(model, test_iter)
 
-        if test_iou > best_test_iou:
-            best_test_iou = test_iou  # Update the best IoU
-            best_model = copy.deepcopy(model)
+        if val_iou > best_val_iou:
+            best_val_iou = val_iou  # Update the best IoU
+            model_to_copy = model.module if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)) else model
+            best_model_state = {k: v.detach().cpu().clone() for k, v in model_to_copy.state_dict().items()}
 
             # Only rank 0 saves checkpoints
             if not hasattr(args, 'rank') or args.rank == 0:
                 save_path = os.path.join(args.save_dir, f'best_model.pt')
+                os.makedirs(args.save_dir, exist_ok=True)
 
-                if isinstance(best_model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
+                if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
                     torch.save({
-                        'model_state_dict': best_model.module.state_dict(),
+                        'model_state_dict': model.module.state_dict(),
                         'optimizer_state_dict': optimizer.state_dict(),
                         'epoch': epoch,
-                        'best_test_iou': best_test_iou,
-                        'model': best_model.module,  # Save the model structure
+                        'best_val_iou': best_val_iou,
+                        'model': model.module,  # Save the model structure
                     }, save_path)
                 else:
                     torch.save({
-                        'model_state_dict': best_model.state_dict(),
+                        'model_state_dict': model.state_dict(),
                         'optimizer_state_dict': optimizer.state_dict(),
                         'epoch': epoch,
-                        'best_test_iou': best_test_iou,
-                        'model': best_model,  # Save the model structure
+                        'best_val_iou': best_val_iou,
+                        'model': model,  # Save the model structure
                     }, save_path)
 
                 # Save args.txt to log_dir when best_model.pt is saved
@@ -135,14 +189,24 @@ def train_samplenet(
             wandb.log({
                 'SampleNet Train/Train_Loss': train_loss,
                 'SampleNet Train/Train_mIoU': train_iou,
-                'SampleNet Test/Test_mIoU': test_iou,
+                'SampleNet Val/Val_mIoU': val_iou,
                 'epoch': epoch
             })
 
-        print(f"Epoch {epoch+1}/{args.epochs}, Train Loss: {train_loss:.4f}, Train IoU: {train_iou:.4f}, Test IoU: {test_iou:.4f}")
+        print(f"Epoch {epoch+1}/{args.epochs}, Train Loss: {train_loss:.4f}, Train IoU: {train_iou:.4f}, Val IoU: {val_iou:.4f}")
+
+    if best_model_state is not None:
+        model_to_load = model.module if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)) else model
+        model_to_load.load_state_dict(best_model_state)
+
+    final_test_iou = test_opt(model, test_loader)
+    print(f"[Final Test] IoU: {final_test_iou:.4f}")
 
     if not hasattr(args, 'rank') or args.rank == 0:
-        wandb.log({'SampleNet Test/Best_mIoU': best_test_iou})
+        wandb.log({
+            'SampleNet Val/Best_mIoU': best_val_iou,
+            'SampleNet Test/Final_mIoU': final_test_iou,
+        })
 
     # Log retrain time
     retrain_end_time = time.time()
@@ -152,9 +216,9 @@ def train_samplenet(
     print(f"Retrain completed in {retrain_hours:.4f} GPU hours")
 
     # Measure inference time (paper-style: warmup + multiple runs)
-    device = next(best_model.parameters()).device
+    device = next(model.parameters()).device
     mean_time, std_time = measure_inference_time(
-        best_model,
+        model,
         input_size=(1, 3, args.resize, args.resize),
         device=device,
         num_warmup=50,
@@ -179,7 +243,7 @@ def train_samplenet(
             test_ind_loader = DataLoader(test_ind_dataset, batch_size=args.test_size, shuffle=False)
 
             # Test mIoU
-            test_ind_iou = test_opt(best_model, test_ind_loader)
+            test_ind_iou = test_opt(model, test_ind_loader)
 
             if not hasattr(args, 'rank') or args.rank == 0:
                 wandb.log({
@@ -191,7 +255,6 @@ def train_samplenet(
             )
 
     # Explicit cleanup to reduce GPU memory fragmentation between seeds
-    del best_model
     del model
     gc.collect()
     if torch.cuda.is_available():

@@ -128,7 +128,7 @@ def get_dataset(args):
 
     if args.data == ['all']:        
         '''Shuffle and split by car model'''
-        dataset = load_folder_model(args.data_dir, args.ratios, args.data)
+        dataset = load_folder_model(args.data_dir, args.ratios, args.data, args.train_val_split)
 
         '''Shuffle and split all image files'''
         # dataset = load_image(args.data_dir, args.ratios)
@@ -136,7 +136,7 @@ def get_dataset(args):
         if args.mode == 'zero':
             dataset = load_zero_shot(args.data_dir, args.data)
         else:   # ind
-            dataset = load_folder_model(args.data_dir, args.ratios, args.data)
+            dataset = load_folder_model(args.data_dir, args.ratios, args.data, args.train_val_split)
 
     transform = set_transforms(args.resize)
 

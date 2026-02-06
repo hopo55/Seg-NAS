@@ -24,6 +24,7 @@ import sys
 sys.path.append(str(Path(__file__).parent.parent))
 
 from latency.latency_predictor import LatencyLUT
+from nas.search_space import STANDARD_OP_NAMES, WIDTH_MULTS
 
 
 @dataclass
@@ -83,11 +84,8 @@ class ParetoSearcher:
     6. Select best architecture for target latency constraint
     """
 
-    OP_NAMES = ['Conv3x3', 'Conv5x5', 'Conv7x7', 'DWSep3x3', 'DWSep5x5']
-    WIDTH_MULTS = [0.5, 0.75, 1.0]
-
     def __init__(self, supernet: nn.Module, luts: Dict[str, LatencyLUT],
-                 num_layers: int = 5, num_ops: int = 5, num_widths: int = 3):
+                 num_layers: int = 5, num_ops: Optional[int] = None, num_widths: Optional[int] = None):
         """
         Args:
             supernet: Trained supernet with weight-sharing
@@ -99,11 +97,43 @@ class ParetoSearcher:
         self.supernet = supernet
         self.luts = luts
         self.num_layers = num_layers
-        self.num_ops = num_ops
-        self.num_widths = num_widths
+
+        if hasattr(supernet, 'module'):
+            module = supernet.module
+        else:
+            module = supernet
+
+        layer0 = getattr(module, 'deconv1', None)
+        if layer0 is not None and hasattr(layer0, 'op_names'):
+            self.op_names = list(layer0.op_names)
+        else:
+            self.op_names = list(STANDARD_OP_NAMES)
+        if layer0 is not None and hasattr(layer0, 'width_mults'):
+            self.width_mults = list(layer0.width_mults)
+        else:
+            self.width_mults = list(WIDTH_MULTS)
+
+        self.num_ops = num_ops if num_ops is not None else len(self.op_names)
+        self.num_widths = num_widths if num_widths is not None else len(self.width_mults)
 
         self.architectures: List[Architecture] = []
         self.pareto_front: Dict[str, List[Architecture]] = {}  # {hardware: pareto_archs}
+
+    def _split_ops_by_cost(self) -> Tuple[List[int], List[int]]:
+        light_ops = []
+        heavy_ops = []
+        for idx, op_name in enumerate(self.op_names):
+            if 'DWSep' in op_name:
+                light_ops.append(idx)
+            else:
+                heavy_ops.append(idx)
+
+        if not light_ops:
+            light_ops = list(range(self.num_ops))
+        if not heavy_ops:
+            heavy_ops = list(range(self.num_ops))
+
+        return light_ops, heavy_ops
 
     def sample_architecture(self, strategy: str = 'random') -> Architecture:
         """
@@ -135,19 +165,18 @@ class ParetoSearcher:
         elif strategy == 'uniform_pareto':
             # Bias towards diverse latency ranges
             # Early layers: prefer lighter ops, Later layers: prefer heavier
+            light_ops, heavy_ops = self._split_ops_by_cost()
             op_indices = []
             width_indices = []
             for l in range(self.num_layers):
                 # Probability shifts from light to heavy ops as layer increases
                 light_prob = 1.0 - (l / (self.num_layers - 1)) * 0.5
                 if np.random.random() < light_prob:
-                    # Prefer DWSep (lighter)
-                    op_indices.append(np.random.choice([3, 4]))  # DWSep3x3, DWSep5x5
-                    width_indices.append(np.random.choice([0, 1]))  # 0.5, 0.75
+                    op_indices.append(np.random.choice(light_ops))
+                    width_indices.append(np.random.choice([0, min(1, self.num_widths - 1)]))
                 else:
-                    # Prefer Conv (heavier)
-                    op_indices.append(np.random.choice([0, 1, 2]))  # Conv3x3, 5x5, 7x7
-                    width_indices.append(np.random.choice([1, 2]))  # 0.75, 1.0
+                    op_indices.append(np.random.choice(heavy_ops))
+                    width_indices.append(np.random.choice([max(0, self.num_widths - 2), self.num_widths - 1]))
         else:
             raise ValueError(f"Unknown sampling strategy: {strategy}")
 
@@ -304,8 +333,8 @@ class ParetoSearcher:
                 lat = lut.get_architecture_latency(
                     arch.op_indices,
                     arch.width_indices,
-                    op_names=self.OP_NAMES,
-                    width_mults=self.WIDTH_MULTS
+                    op_names=self.op_names,
+                    width_mults=self.width_mults
                 )
                 latencies[hw_name] = lat
             except KeyError as e:
@@ -361,19 +390,46 @@ class ParetoSearcher:
 
     def _select_diverse_subset(self, archs: List[Architecture],
                                 n: int) -> List[Architecture]:
-        """Select diverse subset covering different latency ranges."""
+        """Select diverse subset across all hardware latency spaces."""
         if len(archs) <= n:
             return archs
 
-        # Use first hardware for diversity sampling
-        hw_name = list(self.luts.keys())[0]
+        hw_names = list(self.luts.keys())
+        lat_matrix = np.array([
+            [arch.latencies.get(hw, float('inf')) for hw in hw_names]
+            for arch in archs
+        ], dtype=np.float64)
 
-        # Sort by latency
-        sorted_archs = sorted(archs, key=lambda a: a.latencies.get(hw_name, float('inf')))
+        finite_vals = lat_matrix[np.isfinite(lat_matrix)]
+        fallback = (np.max(finite_vals) * 10.0) if finite_vals.size > 0 else 1e6
+        lat_matrix[~np.isfinite(lat_matrix)] = fallback
 
-        # Select evenly spaced
-        indices = np.linspace(0, len(sorted_archs) - 1, n, dtype=int)
-        return [sorted_archs[i] for i in indices]
+        mins = lat_matrix.min(axis=0, keepdims=True)
+        maxs = lat_matrix.max(axis=0, keepdims=True)
+        denom = np.maximum(maxs - mins, 1e-12)
+        norm = (lat_matrix - mins) / denom
+
+        selected = []
+        mean_lat = norm.mean(axis=1)
+        selected.append(int(np.argmin(mean_lat)))
+        if n > 1:
+            second = int(np.argmax(mean_lat))
+            if second != selected[0]:
+                selected.append(second)
+
+        while len(selected) < n:
+            remaining = [i for i in range(len(archs)) if i not in selected]
+            if not remaining:
+                break
+            selected_mat = norm[selected]
+            rem_mat = norm[remaining]
+            # Max-min diversity in multi-hardware latency space
+            dists = np.linalg.norm(rem_mat[:, None, :] - selected_mat[None, :, :], axis=2)
+            min_dists = dists.min(axis=1)
+            best_idx = remaining[int(np.argmax(min_dists))]
+            selected.append(best_idx)
+
+        return [archs[i] for i in selected]
 
     def _extract_pareto_front(self, archs: List[Architecture],
                                hw_name: str) -> List[Architecture]:
