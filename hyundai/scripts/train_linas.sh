@@ -104,7 +104,7 @@ for layer_name, layer_info in lut.get('layers', {}).items():
     ops = layer_info.get('ops', {})
     for op in required:
         if not any(key.startswith(op + '_w') for key in ops.keys()):
-            print(f\"Missing op '{op}' in {lut_path} ({layer_name})\")
+            print(f"Missing op '{op}' in {lut_path} ({layer_name})")
             sys.exit(1)
 PY
 }

@@ -171,7 +171,7 @@ class LatencyLUTBuilder:
             LUT dictionary
         """
         if op_names is None:
-            op_names = ['Conv3x3', 'Conv5x5', 'Conv7x7', 'DWSep3x3', 'DWSep5x5']
+            op_names = OP_NAMES
         if width_mults is None:
             width_mults = WIDTH_MULTS
 
