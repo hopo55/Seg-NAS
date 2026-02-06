@@ -280,10 +280,11 @@ class LatencyLUTBuilder:
             gpu_name = torch.cuda.get_device_name(0)
             print(f"Detected GPU: {gpu_name}")
 
-            # Match to known hardware
+            # Match to known hardware (ignore spaces for comparison)
             current_hw = None
+            gpu_name_nospace = gpu_name.replace(' ', '').lower()
             for hw_name in hardware_list:
-                if hw_name.lower() in gpu_name.lower():
+                if hw_name.replace(' ', '').lower() in gpu_name_nospace:
                     current_hw = hw_name
                     break
 
