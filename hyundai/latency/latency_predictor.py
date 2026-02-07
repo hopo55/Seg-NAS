@@ -78,7 +78,8 @@ class LatencyLUT:
             Total latency in milliseconds
         """
         if op_names is None:
-            op_names = ['Conv3x3', 'Conv5x5', 'Conv7x7', 'DWSep3x3', 'DWSep5x5']
+            from .lut_builder import OP_NAMES
+            op_names = list(OP_NAMES)
         if width_mults is None:
             width_mults = [0.5, 0.75, 1.0]
 
@@ -106,7 +107,8 @@ class LatencyLUT:
             Tensor of shape [num_ops, num_widths]
         """
         if op_names is None:
-            op_names = ['Conv3x3', 'Conv5x5', 'Conv7x7', 'DWSep3x3', 'DWSep5x5']
+            from .lut_builder import OP_NAMES
+            op_names = list(OP_NAMES)
         if width_mults is None:
             width_mults = [0.5, 0.75, 1.0]
 

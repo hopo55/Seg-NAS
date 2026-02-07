@@ -60,10 +60,11 @@ SEARCH_SPACE='industry'
 LATENCY_LAMBDA=1.0
 
 # Target latencies (ms) for each hardware - cycle time constraint: 100ms
+# Actual speed order: RTX4090 > RTX3090 > A6000 > JetsonOrin
 declare -A HARDWARE_TARGETS
-HARDWARE_TARGETS[A6000]=50      # High-end workstation
-HARDWARE_TARGETS[RTX3090]=60    # Consumer high-end
-HARDWARE_TARGETS[RTX4090]=40    # Latest consumer
+HARDWARE_TARGETS[RTX4090]=30    # Fastest consumer GPU
+HARDWARE_TARGETS[RTX3090]=40    # Consumer high-end
+HARDWARE_TARGETS[A6000]=60      # Workstation GPU
 HARDWARE_TARGETS[JetsonOrin]=95 # Edge device (tight constraint)
 
 # Pareto search settings
@@ -73,6 +74,9 @@ PARETO_REFINE_TOPK=5    # Re-evaluate top-k as extracted subnet before final pic
 
 # LUT directory
 LUT_DIR='./hyundai/latency/luts'
+
+# Cross-hardware latency predictor (enables multi-device optimization in Phase 1)
+PREDICTOR_PATH='./hyundai/latency/predictor.pt'
 
 # Mode from command line argument (default: pareto)
 MODE_ARG=${1:-pareto}
@@ -183,11 +187,12 @@ run_pareto() {
         --latency_lambda $LATENCY_LAMBDA \
         --use_latency \
         --lut_dir $LUT_DIR \
+        --predictor_path $PREDICTOR_PATH \
         --hardware_targets "$HW_TARGETS" \
         --pareto_samples $PARETO_SAMPLES \
         --pareto_eval_subset $PARETO_EVAL_SUBSET \
         --pareto_refine_topk $PARETO_REFINE_TOPK \
-        --primary_hardware JetsonOrin
+        --primary_hardware RTX3090
 }
 
 run_single() {

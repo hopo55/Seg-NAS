@@ -75,12 +75,12 @@ if len(luts) < 2:
     print('Warning: Less than 2 hardware LUTs found.')
     print('Cross-hardware generalization may be limited.')
 
-# Create predictor
+# Create predictor (num_ops must match search space: industry=7, extended=5)
 predictor = CrossHardwareLatencyPredictor(
     embed_dim=64,
     num_heads=4,
     num_layers=5,
-    num_ops=5,
+    num_ops=7,
     num_widths=3
 )
 
@@ -110,12 +110,14 @@ for hw_name, lut in luts.items():
 
     with torch.no_grad():
         for _ in range(1000):
-            op_indices = torch.randint(0, 5, (5,))
+            op_indices = torch.randint(0, 7, (5,))
             width_indices = torch.randint(0, 3, (5,))
 
             try:
+                from nas.search_space import ALL_OP_NAMES
                 true_lat = lut.get_architecture_latency(
-                    op_indices.tolist(), width_indices.tolist()
+                    op_indices.tolist(), width_indices.tolist(),
+                    op_names=list(ALL_OP_NAMES)
                 )
             except KeyError:
                 continue
@@ -130,10 +132,6 @@ for hw_name, lut in luts.items():
             errors.append(error)
 
     mae = sum(errors) / len(errors) if errors else 0
-    mape = sum(e / t * 100 for e, t in zip(errors, [lut.get_architecture_latency(
-        torch.randint(0, 5, (5,)).tolist(),
-        torch.randint(0, 3, (5,)).tolist()
-    ) for _ in range(len(errors))][:len(errors)])) / len(errors) if errors else 0
 
     print(f'  {hw_name}: MAE = {mae:.4f} ms')
     results[hw_name] = mae
