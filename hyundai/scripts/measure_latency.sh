@@ -24,8 +24,8 @@
 
 # Settings
 INPUT_SIZE=128
-WARMUP=50
-REPEAT=100
+WARMUP=200
+REPEAT=300
 OUTPUT_DIR='./hyundai/latency/luts'
 
 # Optional: hardware name override (for CPU-only devices)

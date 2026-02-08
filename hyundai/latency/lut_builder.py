@@ -80,7 +80,7 @@ class LatencyLUTBuilder:
         lut = builder.build_lut('RTX4090', save_path='lut_rtx4090.json')
     """
 
-    def __init__(self, input_size: int = 128, warmup: int = 50, repeat: int = 100):
+    def __init__(self, input_size: int = 128, warmup: int = 200, repeat: int = 300):
         """
         Args:
             input_size: Input image size (assumes square)
@@ -128,7 +128,7 @@ class LatencyLUTBuilder:
     def measure_op_latency(self, op: nn.Module, C_in: int, H_in: int, W_in: int,
                            device: str = 'cuda') -> Tuple[float, float]:
         """
-        Measure single operation latency.
+        Measure single operation latency with IQR-based outlier removal.
 
         Args:
             op: Operation module
@@ -141,6 +141,12 @@ class LatencyLUTBuilder:
             (mean_latency_ms, std_latency_ms)
         """
         op = op.to(device).eval()
+
+        # Clear GPU cache before measurement
+        if device == 'cuda':
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
         x = torch.randn(1, C_in, H_in, W_in, device=device)
 
         # Warmup
@@ -167,7 +173,25 @@ class LatencyLUTBuilder:
                 end = time.perf_counter()
                 times.append((end - start) * 1000)  # Convert to ms
 
-        return float(np.mean(times)), float(np.std(times))
+        times = np.array(times)
+
+        # IQR-based outlier removal
+        q1 = np.percentile(times, 25)
+        q3 = np.percentile(times, 75)
+        iqr = q3 - q1
+        lower = q1 - 1.5 * iqr
+        upper = q3 + 1.5 * iqr
+        filtered = times[(times >= lower) & (times <= upper)]
+
+        if len(filtered) < len(times) * 0.5:
+            # Too many outliers removed — fall back to median-based estimate
+            print(f"  Warning: {len(times) - len(filtered)}/{len(times)} outliers detected, "
+                  f"using median-based estimate")
+            median = float(np.median(times))
+            mad = float(np.median(np.abs(times - median)))
+            return median, mad
+
+        return float(np.mean(filtered)), float(np.std(filtered))
 
     def build_lut(self, hardware_name: str, save_path: Optional[str] = None,
                   op_names: List[str] = None, width_mults: List[float] = None,
@@ -382,6 +406,6 @@ def merge_luts(lut_paths: List[str], save_path: Optional[str] = None) -> Dict:
 
 if __name__ == '__main__':
     # Example usage
-    builder = LatencyLUTBuilder(input_size=128, warmup=50, repeat=100)
+    builder = LatencyLUTBuilder(input_size=128, warmup=200, repeat=300)
     luts = builder.build_all_hardware_luts()
     print("\nLUT building complete!")
