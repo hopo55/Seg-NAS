@@ -25,6 +25,7 @@ from utils.operations import (
 
 # Hardware specifications for encoding
 HARDWARE_SPECS = {
+    # --- GPU (CUDA) ---
     'A6000': {
         'cuda_cores': 10752,
         'memory_bandwidth': 768,  # GB/s
@@ -43,11 +44,25 @@ HARDWARE_SPECS = {
         'tensor_cores': 512,
         'memory_gb': 24,
     },
+    # --- Edge (CUDA) ---
     'JetsonOrin': {
         'cuda_cores': 2048,
         'memory_bandwidth': 205,
         'tensor_cores': 64,
         'memory_gb': 8,
+    },
+    # --- Edge (CPU-only) ---
+    'RaspberryPi5': {
+        'cuda_cores': 0,
+        'memory_bandwidth': 32,   # LPDDR4X-4267
+        'tensor_cores': 0,
+        'memory_gb': 8,
+    },
+    'Odroid': {
+        'cuda_cores': 0,
+        'memory_bandwidth': 25,   # LPDDR4/4X
+        'tensor_cores': 0,
+        'memory_gb': 4,
     },
 }
 
@@ -261,12 +276,19 @@ class LatencyLUTBuilder:
 
     def build_all_hardware_luts(self, hardware_list: List[str] = None,
                                  save_dir: str = './hyundai/latency/luts',
+                                 hardware_name: Optional[str] = None,
                                  **kwargs) -> Dict[str, Dict]:
         """
         Build LUTs for all specified hardware.
 
         Note: This requires running on each hardware separately.
         For now, it builds LUT for the current hardware.
+
+        Args:
+            hardware_list: List of known hardware names
+            save_dir: Directory to save LUT JSON files
+            hardware_name: Manually specify hardware name (for CPU-only devices
+                like RaspberryPi5, Odroid). Overrides auto-detection.
         """
         if hardware_list is None:
             hardware_list = list(HARDWARE_SPECS.keys())
@@ -275,7 +297,20 @@ class LatencyLUTBuilder:
         save_dir = Path(save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
 
-        # Detect current hardware
+        # Manual hardware name override (for CPU-only edge devices)
+        if hardware_name is not None:
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            print(f"Hardware name override: {hardware_name} (device: {device})")
+            lut = self.build_lut(
+                hardware_name,
+                save_path=save_dir / f"lut_{hardware_name.lower()}.json",
+                device=device,
+                **kwargs
+            )
+            luts[hardware_name] = lut
+            return luts
+
+        # Auto-detect current hardware
         if torch.cuda.is_available():
             gpu_name = torch.cuda.get_device_name(0)
             print(f"Detected GPU: {gpu_name}")

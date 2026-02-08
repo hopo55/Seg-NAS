@@ -6,11 +6,19 @@
 # This script measures the inference latency of all operations on the current
 # hardware and generates a Look-Up Table (LUT) for LINAS training.
 #
-# Run this script on each target hardware (A6000, RTX3090, RTX4090, JetsonOrin)
-# to generate hardware-specific LUTs.
+# Run this script on each target hardware to generate hardware-specific LUTs.
 #
 # Usage:
+#   # GPU devices (auto-detected):
 #   bash hyundai/scripts/measure_latency.sh
+#
+#   # CPU-only edge devices (specify hardware name):
+#   bash hyundai/scripts/measure_latency.sh RaspberryPi5
+#   bash hyundai/scripts/measure_latency.sh Odroid
+#
+# Supported hardware:
+#   GPU:  A6000, RTX3090, RTX4090
+#   Edge: JetsonOrin (CUDA), RaspberryPi5 (CPU), Odroid (CPU)
 #
 # =============================================================================
 
@@ -19,6 +27,9 @@ INPUT_SIZE=128
 WARMUP=50
 REPEAT=100
 OUTPUT_DIR='./hyundai/latency/luts'
+
+# Optional: hardware name override (for CPU-only devices)
+HARDWARE_NAME=${1:-}
 
 PYTHON=${PYTHON:-python3}
 
@@ -29,6 +40,11 @@ echo "Input Size: ${INPUT_SIZE}x${INPUT_SIZE}"
 echo "Warmup: $WARMUP iterations"
 echo "Repeat: $REPEAT iterations"
 echo "Output Dir: $OUTPUT_DIR"
+if [ -n "$HARDWARE_NAME" ]; then
+    echo "Hardware: $HARDWARE_NAME (manual)"
+else
+    echo "Hardware: auto-detect"
+fi
 echo "=============================================="
 
 # Create output directory
@@ -48,8 +64,13 @@ builder = LatencyLUTBuilder(
     repeat=${REPEAT}
 )
 
-print('Building LUT for current hardware...')
-luts = builder.build_all_hardware_luts(save_dir='${OUTPUT_DIR}')
+hardware_name = '${HARDWARE_NAME}' if '${HARDWARE_NAME}' else None
+
+print('Building LUT...')
+luts = builder.build_all_hardware_luts(
+    save_dir='${OUTPUT_DIR}',
+    hardware_name=hardware_name
+)
 
 print('\\n' + '='*60)
 print('LUT Measurement Complete!')

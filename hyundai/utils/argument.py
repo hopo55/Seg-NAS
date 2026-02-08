@@ -73,12 +73,14 @@ def get_args():
     parser.add_argument('--hardware_targets', type=str, default=None,
                         help='JSON string of hardware targets, e.g., \'{"A6000": 50, "JetsonOrin": 100}\'')
     parser.add_argument('--primary_hardware', type=str, default='A6000',
-                        choices=['A6000', 'RTX3090', 'RTX4090', 'JetsonOrin'],
+                        choices=['A6000', 'RTX3090', 'RTX4090', 'JetsonOrin',
+                                 'RaspberryPi5', 'Odroid'],
                         help='Primary hardware for single-hardware latency optimization')
     parser.add_argument('--lut_dir', type=str, default='./hyundai/latency/luts',
                         help='Directory containing LUT files for all hardware')
     parser.add_argument('--hardware_list', type=str, nargs='+',
-                        default=['A6000', 'RTX3090', 'RTX4090', 'JetsonOrin'],
+                        default=['A6000', 'RTX3090', 'RTX4090', 'JetsonOrin',
+                                 'RaspberryPi5', 'Odroid'],
                         help='List of hardware to consider for Pareto search')
 
     # Pareto search arguments (RF-DETR style)

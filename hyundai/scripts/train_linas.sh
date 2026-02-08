@@ -60,12 +60,14 @@ SEARCH_SPACE='industry'
 LATENCY_LAMBDA=1.0
 
 # Target latencies (ms) for each hardware - cycle time constraint: 100ms
-# Actual speed order: RTX4090 > RTX3090 > A6000 > JetsonOrin
+# Actual speed order: RTX4090 > RTX3090 > A6000 > JetsonOrin > RaspberryPi5 > Odroid
 declare -A HARDWARE_TARGETS
-HARDWARE_TARGETS[RTX4090]=30    # Fastest consumer GPU
-HARDWARE_TARGETS[RTX3090]=40    # Consumer high-end
-HARDWARE_TARGETS[A6000]=60      # Workstation GPU
-HARDWARE_TARGETS[JetsonOrin]=95 # Edge device (tight constraint)
+HARDWARE_TARGETS[RTX4090]=30       # Fastest consumer GPU
+HARDWARE_TARGETS[RTX3090]=40       # Consumer high-end
+HARDWARE_TARGETS[A6000]=60         # Workstation GPU
+HARDWARE_TARGETS[JetsonOrin]=95    # Edge GPU (CUDA)
+HARDWARE_TARGETS[RaspberryPi5]=125 # Edge CPU (ARM Cortex-A76, 32GB/s BW, 8GB)
+HARDWARE_TARGETS[Odroid]=160       # Edge CPU (ARM, 25GB/s BW, 4GB) - slowest
 
 # Pareto search settings
 PARETO_SAMPLES=1000     # Number of architectures to sample
@@ -142,7 +144,7 @@ run_pareto() {
 
     # Check if at least one LUT exists
     local LUT_COUNT=0
-    for HW in A6000 RTX3090 RTX4090 JetsonOrin; do
+    for HW in A6000 RTX3090 RTX4090 JetsonOrin RaspberryPi5 Odroid; do
         local LUT_PATH="${LUT_DIR}/lut_${HW,,}.json"
         if [ -f "$LUT_PATH" ]; then
             if ! validate_lut_for_search_space "$LUT_PATH" "$SEARCH_SPACE"; then
@@ -267,7 +269,7 @@ if [ "$MODE_ARG" = "pareto" ]; then
     for SEED in "${SEEDS[@]}"; do
         run_pareto $SEED
     done
-elif [[ " A6000 RTX3090 RTX4090 JetsonOrin " =~ " ${MODE_ARG} " ]]; then
+elif [[ " A6000 RTX3090 RTX4090 JetsonOrin RaspberryPi5 Odroid " =~ " ${MODE_ARG} " ]]; then
     # Single hardware mode
     for SEED in "${SEEDS[@]}"; do
         run_single $SEED $MODE_ARG
@@ -276,11 +278,13 @@ else
     echo "Error: Invalid mode/hardware '$MODE_ARG'"
     echo ""
     echo "Usage:"
-    echo "  bash train_linas.sh pareto      # RF-DETR style Pareto discovery"
-    echo "  bash train_linas.sh JetsonOrin  # Single hardware optimization"
-    echo "  bash train_linas.sh A6000"
+    echo "  bash train_linas.sh pareto         # RF-DETR style Pareto discovery"
+    echo "  bash train_linas.sh RTX4090        # Single hardware optimization"
     echo "  bash train_linas.sh RTX3090"
-    echo "  bash train_linas.sh RTX4090"
+    echo "  bash train_linas.sh A6000"
+    echo "  bash train_linas.sh JetsonOrin"
+    echo "  bash train_linas.sh RaspberryPi5"
+    echo "  bash train_linas.sh Odroid"
     exit 1
 fi
 
