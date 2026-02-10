@@ -18,7 +18,7 @@
 # =============================================================================
 
 # Environment
-SEEDS=(0)
+SEEDS=(0 1 2 42 123)
 DATA='all'
 
 # GPU Configuration for DDP
