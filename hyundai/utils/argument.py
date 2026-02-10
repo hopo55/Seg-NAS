@@ -1,7 +1,16 @@
 import argparse
 
+DEFAULT_BASELINE_MODELS = ['autopatch', 'realtimeseg', 'unet', 'deeplabv3plus']
 
-def get_args():
+def add_comparison_args(parser):
+    """Register CLI arguments for baseline comparison experiments."""
+    parser.add_argument('--baseline_models', type=str, nargs='+',
+                        default=DEFAULT_BASELINE_MODELS.copy(),
+                        choices=DEFAULT_BASELINE_MODELS,
+                        help='Baseline models to compare (default: all)')
+
+
+def get_args(include_comparison_args=False):
     parser = argparse.ArgumentParser()
 
     # Environment Argument
@@ -91,13 +100,9 @@ def get_args():
     parser.add_argument('--pareto_refine_topk', type=int, default=5,
                         help='Top-k Pareto candidates to re-evaluate as extracted subnet for final selection (default: 5)')
 
-    # Comparison arguments
-    parser.add_argument('--comparison', action='store_true',
-                        help='Run comparison with baseline models (AutoPatch, RealtimeSeg style)')
-    parser.add_argument('--baseline_models', type=str, nargs='+',
-                        default=['autopatch', 'realtimeseg', 'unet', 'deeplabv3plus'],
-                        choices=['autopatch', 'realtimeseg', 'unet', 'deeplabv3plus'],
-                        help='Baseline models to compare (default: all)')
+    # Comparison arguments (only for comparison entrypoint)
+    if include_comparison_args:
+        add_comparison_args(parser)
     parser.add_argument('--save_dir', type=str, default='./checkpoints',
                         help='Directory to save trained model checkpoints (default: ./checkpoints)')
     parser.add_argument('--log_dir', type=str, default='./logs',

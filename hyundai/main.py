@@ -17,7 +17,6 @@ from segmentation import (
     search_and_discover_pareto,
     discover_pareto_architectures
 )
-from comparison import run_comparison
 from test import test_model
 
 
@@ -123,13 +122,6 @@ def main():
 
         # Train and Test of the Optimized Architecture
         train_searched_model(args, searched_model, dataset)
-
-        # Run comparison with baseline models if enabled
-        if args.comparison:
-            print("\n" + "=" * 60)
-            print("Running Baseline Comparison")
-            print("=" * 60)
-            run_comparison(args, dataset)
 
         if not hasattr(args, 'rank') or args.rank == 0:
             wandb.finish()
