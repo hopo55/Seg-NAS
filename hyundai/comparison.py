@@ -24,7 +24,9 @@ def main():
     args.log_dir = f"./hyundai/logs/comparison_{data_name}_seed{args.seed}/{timestamp}/"
 
     run_name = f"hyundai_comparison_seed{args.seed}"
-    wandb.init(config=args, project="Seg-NAS", entity="hopo55", name=run_name)
+    wandb_config = vars(args).copy()
+    wandb_config["mode"] = "comparison"
+    wandb.init(config=wandb_config, project="Seg-NAS", entity="hopo55", name=run_name)
 
     dataset = get_dataset(args)
     run_comparison(args, dataset)

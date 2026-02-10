@@ -17,7 +17,8 @@
 # =============================================================================
 
 # Environment
-SEEDS=(0 1 2 42 123)
+# SEEDS=(0 1 2 42 123)
+SEEDS=(0)
 DATA='all'
 
 # GPU configuration (DataParallel)
@@ -30,9 +31,9 @@ RESIZE=128
 TEST_RATIO=0.2
 
 # Training settings
-BATCH_SIZE=32
+BATCH_SIZE=64
 OPT_LR=0.001
-EPOCHS=2
+EPOCHS=1
 
 # Baseline models to compare
 # BASELINE_MODELS=(unet deeplabv3plus autopatch realtimeseg)

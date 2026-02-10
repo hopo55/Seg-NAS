@@ -150,7 +150,7 @@ def get_model_complexity(model, input_size=(1, 3, 128, 128), device='cuda'):
         flops: FLOPs in GFLOPs
         params: Parameters in millions
     """
-    from thop import profile, clever_format
+    from thop import profile
 
     # Handle DataParallel and DDP
     if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
@@ -161,8 +161,14 @@ def get_model_complexity(model, input_size=(1, 3, 128, 128), device='cuda'):
     model_to_profile.eval()
     dummy_input = torch.randn(input_size).to(device)
 
-    with torch.no_grad():
-        flops, params = profile(model_to_profile, inputs=(dummy_input,), verbose=False)
+    try:
+        with torch.no_grad():
+            flops, params = profile(model_to_profile, inputs=(dummy_input,), verbose=False)
+    finally:
+        # THOP registers these buffers on CPU; remove them to avoid DataParallel device mismatch.
+        for m in model_to_profile.modules():
+            m._buffers.pop('total_ops', None)
+            m._buffers.pop('total_params', None)
 
     # Convert to GFLOPs and millions
     gflops = flops / 1e9
