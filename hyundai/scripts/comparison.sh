@@ -35,7 +35,8 @@ OPT_LR=0.001
 EPOCHS=2
 
 # Baseline models to compare
-BASELINE_MODELS=(autopatch realtimeseg unet deeplabv3plus)
+# BASELINE_MODELS=(unet deeplabv3plus autopatch realtimeseg)
+BASELINE_MODELS=(unet)
 
 PYTHON=${PYTHON:-python3}
 MODE_ARG=${1:-baseline}
