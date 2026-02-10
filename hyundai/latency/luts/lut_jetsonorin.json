@@ -1,5 +1,5 @@
 {
-  "hardware": "CPU",
+  "hardware": "JetsonOrin",
   "input_size": 128,
   "warmup": 200,
   "repeat": 300,
