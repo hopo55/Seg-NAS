@@ -72,7 +72,7 @@ class SuperNet(nn.Module):
 
         self.classifier = nn.Conv2d(32, n_class, kernel_size=1)
 
-    def forward(self, x):
+    def forward(self, x, temperature=1.0, hard=False):
         output = self.pretrained_net(x)
 
         x5 = output["x5"]  # size=(N, 512, x.H/32, x.W/32)
@@ -81,15 +81,15 @@ class SuperNet(nn.Module):
         x2 = output["x2"]  # size=(N, 128, x.H/4,  x.W/4)
         x1 = output["x1"]  # size=(N, 64, x.H/2,  x.W/2)
 
-        score = self.deconv1(x5)  # size=(N, 512, x.H/16, x.W/16)
+        score = self.deconv1(x5, temperature=temperature, hard=hard)  # size=(N, 512, x.H/16, x.W/16)
         score = score + x4  # element-wise add, size=(N, 512, x.H/16, x.W/16)
-        score = self.deconv2(score)  # size=(N, 256, x.H/8, x.W/8)
+        score = self.deconv2(score, temperature=temperature, hard=hard)  # size=(N, 256, x.H/8, x.W/8)
         score = score + x3  # element-wise add, size=(N, 256, x.H/8, x.W/8)
-        score = self.deconv3(score)  # size=(N, 128, x.H/4, x.W/4)
+        score = self.deconv3(score, temperature=temperature, hard=hard)  # size=(N, 128, x.H/4, x.W/4)
         score = score + x2  # element-wise add, size=(N, 128, x.H/4, x.W/4)
-        score = self.deconv4(score)  # size=(N, 64, x.H/2, x.W/2)
+        score = self.deconv4(score, temperature=temperature, hard=hard)  # size=(N, 64, x.H/2, x.W/2)
         score = score + x1  # element-wise add, size=(N, 64, x.H/2, x.W/2)
-        score = self.deconv5(score)  # size=(N, 32, x.H, x.W)
+        score = self.deconv5(score, temperature=temperature, hard=hard)  # size=(N, 32, x.H, x.W)
         score = self.classifier(score)  # size=(N, n_class, x.H/1, x.W/1)
 
         return score  # size=(N, n_class, x.H/1, x.W/1)

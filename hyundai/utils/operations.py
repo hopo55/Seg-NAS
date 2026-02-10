@@ -77,8 +77,8 @@ class MixedOp(nn.Module):
         """Kept for backward compatibility."""
         return torch.nn.functional.gumbel_softmax(self.alphas, tau=temperature, hard=hard)
 
-    def forward(self, x):
-        weights = self._normalized_alphas()
+    def forward(self, x, temperature=1.0, hard=False):
+        weights = self._gumbel_softmax(temperature=temperature, hard=hard)
         x = sum(alpha * op(x) for alpha, op in zip(weights, self._ops))
         x = self.relu(x)
         x = self.bn(x)
@@ -106,9 +106,8 @@ class MixedOp(nn.Module):
         """
         Calculate expected FLOPs under architecture distribution.
         """
-        del temperature
         flops_tensor = self.alphas.new_tensor(self._flops_per_op(H_out, W_out))
-        weights = self._normalized_alphas()
+        weights = self._gumbel_softmax(temperature=temperature, hard=False)
         return (weights * flops_tensor).sum()
 
     def get_argmax_flops(self, H_out, W_out):
@@ -178,10 +177,10 @@ class MixedOpWithWidth(nn.Module):
         """Kept for backward compatibility."""
         return torch.nn.functional.gumbel_softmax(self.alphas_width, tau=temperature, hard=hard)
 
-    def forward(self, x):
+    def forward(self, x, temperature=1.0, hard=False):
         outputs = []
-        op_weights = self._normalized_alphas_op()
-        width_weights = self._normalized_alphas_width()
+        op_weights = self._gumbel_softmax_op(temperature=temperature, hard=hard)
+        width_weights = self._gumbel_softmax_width(temperature=temperature, hard=hard)
 
         for wi, wm in enumerate(self.width_mults):
             wm_key = f"w{int(wm*100)}"
@@ -293,10 +292,8 @@ class MixedOpWithWidth(nn.Module):
         """
         Calculate expected latency using LUT and soft architecture weights.
         """
-        del temperature
-
-        op_weights = self._normalized_alphas_op()
-        width_weights = self._normalized_alphas_width()
+        op_weights = self._gumbel_softmax_op(temperature=temperature, hard=False)
+        width_weights = self._gumbel_softmax_width(temperature=temperature, hard=False)
 
         total_latency = self.alphas_op.new_tensor(0.0)
         for wi, wm in enumerate(self.width_mults):

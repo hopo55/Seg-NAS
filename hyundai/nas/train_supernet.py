@@ -11,6 +11,78 @@ from typing import Dict, Optional
 from utils.utils import AverageMeter, get_iou_score
 
 
+def calculate_gumbel_temperature(epoch, total_epochs, tau_max=5.0, tau_min=0.1):
+    """
+    Calculate Gumbel-Softmax temperature with exponential annealing.
+
+    Formula: τ_t = τ_max · (τ_min / τ_max)^(t/T)
+
+    Args:
+        epoch: Current epoch (0-indexed)
+        total_epochs: Total number of training epochs
+        tau_max: Initial temperature (exploration phase)
+        tau_min: Final temperature (exploitation phase)
+
+    Returns:
+        current_temperature: Temperature value for current epoch
+    """
+    ratio = epoch / total_epochs
+    temperature = tau_max * ((tau_min / tau_max) ** ratio)
+    return temperature
+
+
+def get_gumbel_hard_mode(epoch, total_epochs, threshold=0.8):
+    """
+    Determine whether to use hard or soft Gumbel-Softmax.
+
+    Args:
+        epoch: Current epoch (0-indexed)
+        total_epochs: Total number of training epochs
+        threshold: Ratio at which to switch from soft to hard (default 0.8 = last 20%)
+
+    Returns:
+        hard: True if should use hard Gumbel-Softmax, False otherwise
+    """
+    ratio = epoch / total_epochs
+    return ratio >= threshold
+
+
+def compute_alpha_entropy(model):
+    """
+    Compute average entropy of architecture parameters (alphas).
+
+    Higher entropy = more exploration (uncertain about best operations)
+    Lower entropy = more exploitation (converging to specific operations)
+
+    Args:
+        model: SuperNet model
+
+    Returns:
+        avg_entropy: Average entropy across all MixedOp layers
+    """
+    entropies = []
+    module = model.module if hasattr(model, 'module') else model
+
+    for name, m in module.named_modules():
+        if hasattr(m, 'alphas_op'):  # MixedOpWithWidth
+            # Op alphas entropy
+            op_probs = torch.softmax(m.alphas_op, dim=0)
+            op_entropy = -(op_probs * torch.log(op_probs + 1e-8)).sum()
+            entropies.append(op_entropy.item())
+
+            # Width alphas entropy
+            width_probs = torch.softmax(m.alphas_width, dim=0)
+            width_entropy = -(width_probs * torch.log(width_probs + 1e-8)).sum()
+            entropies.append(width_entropy.item())
+
+        elif hasattr(m, 'alphas'):  # MixedOp
+            probs = torch.softmax(m.alphas, dim=0)
+            entropy = -(probs * torch.log(probs + 1e-8)).sum()
+            entropies.append(entropy.item())
+
+    return sum(entropies) / len(entropies) if entropies else 0.0
+
+
 def _is_main_process(args) -> bool:
     return (not hasattr(args, 'rank')) or args.rank == 0
 
@@ -57,7 +129,12 @@ def train_weight_alpha(
     loss,
     optimizer_weight,
     optimizer_alpha,
+    epoch=0,
 ):
+    # Calculate Gumbel-Softmax temperature for current epoch
+    current_temp = calculate_gumbel_temperature(epoch, args.epochs)
+    hard_mode = get_gumbel_hard_mode(epoch, args.epochs)
+
     model.train()
     train_w_loss = AverageMeter()
     train_w_iou = AverageMeter()
@@ -70,7 +147,7 @@ def train_weight_alpha(
         data, labels = data.to(device, non_blocking=True), labels.to(device, non_blocking=True)
         batch_size = data.size(0)
         optimizer_weight.zero_grad()
-        outputs = model(data)
+        outputs = model(data, temperature=current_temp, hard=hard_mode)
         loss_value = loss(outputs, labels)
         train_w_loss.update(loss_value.item(), batch_size)
         train_w_iou.update(get_iou_score(outputs, labels), batch_size)
@@ -89,16 +166,16 @@ def train_weight_alpha(
         data, labels = data.to(device, non_blocking=True), labels.to(device, non_blocking=True)
         batch_size = data.size(0)
         optimizer_alpha.zero_grad()
-        outputs = model(data)
+        outputs = model(data, temperature=current_temp, hard=hard_mode)
         ce_loss = loss(outputs, labels)
 
         # Multi-objective: Add FLOPs penalty using Gumbel-Softmax sampling
         # This gives FLOPs closer to actual selected operation (not weighted average)
         if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
-            sampled_flops = model.module.get_sampled_flops(args.resize)
+            sampled_flops = model.module.get_sampled_flops(args.resize, temperature=current_temp)
             argmax_flops = model.module.get_argmax_flops(args.resize)
         else:
-            sampled_flops = model.get_sampled_flops(args.resize)
+            sampled_flops = model.get_sampled_flops(args.resize, temperature=current_temp)
             argmax_flops = model.get_argmax_flops(args.resize)
 
         # Target-based FLOPs loss: |sampled - target| / norm_base
@@ -141,6 +218,18 @@ def train_weight_alpha(
             iou=f"{train_a_iou.avg:.4f}",
         )
 
+    # Calculate and log alpha entropy
+    alpha_entropy = compute_alpha_entropy(model)
+
+    # Log Gumbel-Softmax temperature and alpha entropy
+    if wandb.run is not None and _is_main_process(args):
+        wandb.log({
+            'train/gumbel_temperature': current_temp,
+            'train/gumbel_hard_mode': int(hard_mode),
+            'train/alpha_entropy': alpha_entropy,
+            'epoch': epoch
+        })
+
     return train_w_loss.avg, train_w_iou.avg, train_a_loss.avg, train_a_iou.avg, train_a_flops.avg
 
 
@@ -159,6 +248,7 @@ def train_weight_alpha_with_latency(
     latency_predictor=None,
     latency_lut=None,
     hardware_targets: Optional[Dict[str, float]] = None,
+    epoch=0,
 ):
     """
     Train weight and alpha with multi-hardware latency constraints.
@@ -175,10 +265,15 @@ def train_weight_alpha_with_latency(
         latency_lut: LatencyLUT for current hardware (optional)
         hardware_targets: Dict mapping hardware name to target latency (ms)
             e.g., {'A6000': 50, 'RTX4090': 40, 'JetsonOrin': 100}
+        epoch: Current epoch number (for temperature scheduling)
 
     Returns:
         Tuple of metrics: (w_loss, w_iou, a_loss, a_iou, latency)
     """
+    # Calculate Gumbel-Softmax temperature for current epoch
+    current_temp = calculate_gumbel_temperature(epoch, args.epochs)
+    hard_mode = get_gumbel_hard_mode(epoch, args.epochs)
+
     model.train()
     train_w_loss = AverageMeter()
     train_w_iou = AverageMeter()
@@ -193,7 +288,7 @@ def train_weight_alpha_with_latency(
         data, labels = data.to(device, non_blocking=True), labels.to(device, non_blocking=True)
         batch_size = data.size(0)
         optimizer_weight.zero_grad()
-        outputs = model(data)
+        outputs = model(data, temperature=current_temp, hard=hard_mode)
         loss_value = loss(outputs, labels)
         train_w_loss.update(loss_value.item(), batch_size)
         train_w_iou.update(get_iou_score(outputs, labels), batch_size)
@@ -212,7 +307,7 @@ def train_weight_alpha_with_latency(
         data, labels = data.to(device, non_blocking=True), labels.to(device, non_blocking=True)
         batch_size = data.size(0)
         optimizer_alpha.zero_grad()
-        outputs = model(data)
+        outputs = model(data, temperature=current_temp, hard=hard_mode)
         ce_loss = loss(outputs, labels)
 
         # Get architecture encoding
@@ -261,7 +356,7 @@ def train_weight_alpha_with_latency(
             # Single hardware LUT-based latency
             target_latency = getattr(args, "target_latency", None)
 
-            sampled_latency = module.get_sampled_latency(latency_lut)
+            sampled_latency = module.get_sampled_latency(latency_lut, temperature=current_temp)
             current_latency = module.get_argmax_latency(latency_lut)
 
             if target_latency is not None and target_latency > 0:
@@ -273,7 +368,7 @@ def train_weight_alpha_with_latency(
 
         else:
             # Fallback to FLOPs-based (original behavior)
-            sampled_flops = module.get_sampled_flops(args.resize)
+            sampled_flops = module.get_sampled_flops(args.resize, temperature=current_temp)
             argmax_flops = module.get_argmax_flops(args.resize)
 
             target_flops = getattr(args, "target_flops", None)
@@ -313,6 +408,18 @@ def train_weight_alpha_with_latency(
             lat=f"{train_latency.avg:.2f}ms",
             iou=f"{train_a_iou.avg:.4f}",
         )
+
+    # Calculate and log alpha entropy
+    alpha_entropy = compute_alpha_entropy(model)
+
+    # Log Gumbel-Softmax temperature and alpha entropy
+    if wandb.run is not None and _is_main_process(args):
+        wandb.log({
+            'train/gumbel_temperature': current_temp,
+            'train/gumbel_hard_mode': int(hard_mode),
+            'train/alpha_entropy': alpha_entropy,
+            'epoch': epoch
+        })
 
     return (train_w_loss.avg, train_w_iou.avg, train_a_loss.avg,
             train_a_iou.avg, train_latency.avg)
