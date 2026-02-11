@@ -26,7 +26,8 @@ VISIBLE_GPUS="0,1"
 GPU_IDX=(0 1)
 
 # Data settings
-DATA_DIR='./dataset/image'
+DATA_DIR=${DATA_DIR:-'./dataset/image'}
+LABEL_DIR_NAME=${LABEL_DIR_NAME:-target}
 RESIZE=128
 TEST_RATIO=0.2
 
@@ -37,7 +38,7 @@ EPOCHS=1
 
 # Baseline models to compare
 # BASELINE_MODELS=(unet deeplabv3plus autopatch realtimeseg)
-BASELINE_MODELS=(autopatch)
+BASELINE_MODELS=(unet)
 
 PYTHON=${PYTHON:-python3}
 MODE_ARG=${1:-baseline}
@@ -79,6 +80,7 @@ run_baseline_comparison() {
         --mode nas \
         --data "$DATA" \
         --data_dir "$DATA_DIR" \
+        --label_dir_name "$LABEL_DIR_NAME" \
         --resize "$RESIZE" \
         --ratios "$TEST_RATIO" \
         --gpu_idx "${GPU_IDX[@]}" \
