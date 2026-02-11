@@ -234,11 +234,18 @@ def train_samplenet(
     if args.mode != 'ind':
         # Test individual car model
         names = ["CE", "DF", "GN7 일반", "GN7 파노라마"]
+        label_dir_name = getattr(args, 'label_dir_name', 'target')
+        source_dir_name = os.path.basename(os.path.normpath(args.data_dir))
         for test_ind in test_ind_data:
             matching_name = next((name for sublist in test_ind for name in names if name in sublist), None)
 
             transform = set_transforms(args.resize)
-            test_ind_dataset = ImageDataset(test_ind, transform)
+            test_ind_dataset = ImageDataset(
+                test_ind,
+                transform,
+                label_dir_name=label_dir_name,
+                source_dir_name=source_dir_name,
+            )
 
             test_ind_loader = DataLoader(test_ind_dataset, batch_size=args.test_size, shuffle=False)
 

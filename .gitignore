@@ -2,10 +2,13 @@
 *.zip
 *.jpg
 *.csv
+*.png
 original
 image
 target
 roi
+target_ori
+target_original
 # model pt files
 *.pt
 

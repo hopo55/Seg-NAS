@@ -12,6 +12,35 @@ from torch.utils.data import Dataset
 
 # matplotlib.use('Agg')
 
+
+def _replace_dir_component(path, src_name, dst_name):
+    """Replace one directory component in a path, preserving absolute/relative form."""
+    normalized = os.path.normpath(path)
+    drive, tail = os.path.splitdrive(normalized)
+    is_abs = tail.startswith(os.sep)
+    parts = [p for p in tail.split(os.sep) if p]
+    for i, part in enumerate(parts):
+        if part == src_name:
+            parts[i] = dst_name
+            rebuilt = os.path.join(*parts) if parts else ""
+            if is_abs:
+                rebuilt = os.sep + rebuilt
+            return drive + rebuilt
+    return path.replace(src_name, dst_name, 1)
+
+
+def _resolve_label_path(label_path):
+    """
+    Prefer lossless masks when both exist (e.g., .png over .jpg) by trying
+    sibling files with common image extensions.
+    """
+    root, _ = os.path.splitext(label_path)
+    for ext in (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"):
+        candidate = root + ext
+        if os.path.exists(candidate):
+            return candidate
+    return label_path
+
 def set_transforms(resize=128):
     # set up transforms
     transform = transforms.Compose(
@@ -157,10 +186,12 @@ def load_zero_shot(data_dir, name):
 
 
 class ImageDataset(Dataset):
-    def __init__(self, data_dir, transform=None):
+    def __init__(self, data_dir, transform=None, label_dir_name="target", source_dir_name="image"):
         self.data = []
         self.data_dir = data_dir
         self.transform = transform
+        self.label_dir_name = label_dir_name
+        self.source_dir_name = source_dir_name
 
         for folder in self.data_dir:
             # # if use all image files
@@ -174,7 +205,8 @@ class ImageDataset(Dataset):
 
     def __getitem__(self, idx):
         # check if data and label are the same name after ../(dir)/
-        label_dir = self.data[idx].replace("image", "target")
+        label_dir = _replace_dir_component(self.data[idx], self.source_dir_name, self.label_dir_name)
+        label_dir = _resolve_label_path(label_dir)
         
         image = cv2.imread(self.data[idx])
         label = cv2.imread(label_dir, cv2.IMREAD_GRAYSCALE)
@@ -197,10 +229,12 @@ class ImageDataset(Dataset):
 
 '''hotstamping'''
 class HotDataset(Dataset):
-    def __init__(self, data_dir, transform=None, name=None):
+    def __init__(self, data_dir, transform=None, name=None, label_dir_name="target", source_dir_name="image"):
         self.data = []
         self.data_dir = data_dir
         self.transform = transform
+        self.label_dir_name = label_dir_name
+        self.source_dir_name = source_dir_name
 
         # Define the ranges for each car model
         ranges = {
@@ -261,7 +295,8 @@ class HotDataset(Dataset):
 
     def __getitem__(self, idx):
         # check if data and label are the same name after ../(dir)/
-        label_dir = self.data[idx].replace("image", "target")
+        label_dir = _replace_dir_component(self.data[idx], self.source_dir_name, self.label_dir_name)
+        label_dir = _resolve_label_path(label_dir)
         
         image = cv2.imread(self.data[idx])
         label = cv2.imread(label_dir, cv2.IMREAD_GRAYSCALE)
@@ -295,7 +330,10 @@ class TestDataset(Dataset):
 
     def __getitem__(self, idx):
         # check if data and label are the same name after ../(dir)/
-        label_dir = self.data[idx].replace("image", "target")
+        source_dir_name = os.path.basename(os.path.normpath(getattr(self.args, "data_dir", "image")))
+        label_dir_name = getattr(self.args, "label_dir_name", "target")
+        label_dir = _replace_dir_component(self.data[idx], source_dir_name, label_dir_name)
+        label_dir = _resolve_label_path(label_dir)
         self.data_dir.append(self.data[idx])
         
         image = cv2.imread(self.data[idx])

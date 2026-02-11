@@ -139,6 +139,8 @@ def get_dataset(args):
             dataset = load_folder_model(args.data_dir, args.ratios, args.data, args.train_val_split)
 
     transform = set_transforms(args.resize)
+    label_dir_name = getattr(args, 'label_dir_name', 'target')
+    source_dir_name = os.path.basename(os.path.normpath(args.data_dir))
 
     if args.mode == 'hot':
         # set test dataset for hotstamping mode
@@ -149,8 +151,23 @@ def get_dataset(args):
         # set dataset for nas, ind, zero mode
         train_data, val_data, test_data, test_ind_data = dataset
 
-        train_dataset = ImageDataset(train_data, transform)
-        val_dataset = ImageDataset(val_data, transform)
-        test_dataset = ImageDataset(test_data, transform)
+        train_dataset = ImageDataset(
+            train_data,
+            transform,
+            label_dir_name=label_dir_name,
+            source_dir_name=source_dir_name,
+        )
+        val_dataset = ImageDataset(
+            val_data,
+            transform,
+            label_dir_name=label_dir_name,
+            source_dir_name=source_dir_name,
+        )
+        test_dataset = ImageDataset(
+            test_data,
+            transform,
+            label_dir_name=label_dir_name,
+            source_dir_name=source_dir_name,
+        )
 
         return train_dataset, val_dataset, test_dataset, test_ind_data

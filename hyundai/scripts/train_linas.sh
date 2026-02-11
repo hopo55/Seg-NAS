@@ -37,7 +37,8 @@ export OMP_NUM_THREADS=$THREADS_PER_PROC
 export MKL_NUM_THREADS=$THREADS_PER_PROC
 
 # Data Settings
-DATA_DIR='./dataset/image'
+DATA_DIR=${DATA_DIR:-'./dataset/image'}
+LABEL_DIR_NAME=${LABEL_DIR_NAME:-target}
 RESIZE=128
 TEST_RATIO=0.2
 
@@ -174,6 +175,7 @@ run_pareto() {
         --mode pareto \
         --data $DATA \
         --data_dir $DATA_DIR \
+        --label_dir_name $LABEL_DIR_NAME \
         --resize $RESIZE \
         --ratios $TEST_RATIO \
         --alpha_lr $ALPHA_LR \
@@ -233,6 +235,7 @@ run_single() {
         --mode nas \
         --data $DATA \
         --data_dir $DATA_DIR \
+        --label_dir_name $LABEL_DIR_NAME \
         --resize $RESIZE \
         --ratios $TEST_RATIO \
         --alpha_lr $ALPHA_LR \

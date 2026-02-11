@@ -27,6 +27,8 @@ def get_args(include_comparison_args=False):
                         help='select one or more datasets')
     parser.add_argument('--data_dir', type=str, default='./dataset/image', 
                         help='select one or more datasets')
+    parser.add_argument('--label_dir_name', type=str, default='target',
+                        help='Label directory name paired with data_dir (e.g., target, target_ori).')
     parser.add_argument('--resize', type=int, default=128,
                         help='Resize dimension as a single integer (e.g., 128).')
     parser.add_argument('--ratios', type=float, default=0.2, 
