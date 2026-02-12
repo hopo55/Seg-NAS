@@ -1,6 +1,5 @@
 import os
 import time
-import wandb
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
@@ -222,15 +221,6 @@ def train_weight_alpha(
     # Calculate and log alpha entropy
     alpha_entropy = compute_alpha_entropy(model)
 
-    # Log Gumbel-Softmax temperature and alpha entropy
-    if wandb.run is not None and _is_main_process(args):
-        wandb.log({
-            'train/gumbel_temperature': current_temp,
-            'train/gumbel_hard_mode': int(hard_mode),
-            'train/alpha_entropy': alpha_entropy,
-            'epoch': epoch
-        })
-
     return train_w_loss.avg, train_w_iou.avg, train_a_loss.avg, train_a_iou.avg, train_a_flops.avg
 
 
@@ -413,15 +403,6 @@ def train_weight_alpha_with_latency(
     # Calculate and log alpha entropy
     alpha_entropy = compute_alpha_entropy(model)
 
-    # Log Gumbel-Softmax temperature and alpha entropy
-    if wandb.run is not None and _is_main_process(args):
-        wandb.log({
-            'train/gumbel_temperature': current_temp,
-            'train/gumbel_hard_mode': int(hard_mode),
-            'train/alpha_entropy': alpha_entropy,
-            'epoch': epoch
-        })
-
     return (train_w_loss.avg, train_w_iou.avg, train_a_loss.avg,
             train_a_iou.avg, train_latency.avg)
 
@@ -522,23 +503,12 @@ def train_architecture_with_latency(
         train_loss, train_iou = train_warmup(model, train_loader, loss, optimizer_weight)
         val_iou = test_architecture(model, val_loader, desc="Warmup Val")
 
-        # Only rank 0 logs to wandb
-        if _is_main_process(args):
-            wandb.log({
-                'Architecture Warmup/Train_Loss': train_loss,
-                'Architecture Warmup/Train_mIoU': train_iou,
-                'Architecture Warmup/Val_mIoU': val_iou,
-                'epoch': epoch
-            })
-
         print(f"Epoch {epoch+1}/{args.warmup_epochs}, "
               f"Train Loss: {train_loss:.4f}, Train mIoU: {train_iou:.4f}, "
               f"Val mIoU: {val_iou:.4f}")
 
     warmup_end_time = time.time()
     warmup_hours = (warmup_end_time - warmup_start_time) / 3600
-    if _is_main_process(args):
-        wandb.log({'Search Cost/Warmup (GPU hours)': warmup_hours})
     print(f"Warmup completed in {warmup_hours:.4f} GPU hours")
 
     # Search phase
@@ -590,39 +560,6 @@ def train_architecture_with_latency(
 
                 torch.save(model_to_save.state_dict(), save_path)
 
-        # Log alpha values
-        if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
-            alphas = model.module.get_alphas()
-            search_space = model.module.search_space
-        else:
-            alphas = model.get_alphas()
-            search_space = model.search_space
-
-        alpha_log = {}
-        if search_space in ('extended', 'industry'):
-            for i, alpha_dict in enumerate(alphas, 1):
-                for j, val in enumerate(alpha_dict['op']):
-                    alpha_log[f'Alphas/deconv{i}_op{j}'] = val
-                for j, val in enumerate(alpha_dict['width']):
-                    alpha_log[f'Alphas/deconv{i}_width{j}'] = val
-        else:
-            for i, alpha_list in enumerate(alphas, 1):
-                for j, val in enumerate(alpha_list):
-                    alpha_log[f'Alphas/deconv{i}_op{j}'] = val
-
-        # Only rank 0 logs to wandb
-        if _is_main_process(args):
-            wandb.log({
-                'LINAS Train/Weight_Loss': train_w_loss,
-                'LINAS Train/Alpha_Loss': train_a_loss,
-                'LINAS Train/Weight_mIoU': train_w_iou,
-                'LINAS Train/Alpha_mIoU': train_a_iou,
-                'LINAS Train/Latency (ms)': train_latency,
-                'LINAS Val/Val_mIoU': val_iou,
-                'epoch': epoch,
-                **alpha_log
-            })
-
         print(
             f"Epoch {epoch+1}/{args.epochs}\n"
             f"[Train W] Loss: {train_w_loss:.4f}, mIoU: {train_w_iou:.4f}\n"
@@ -635,11 +572,6 @@ def train_architecture_with_latency(
     search_end_time = time.time()
     search_hours = (search_end_time - search_start_time) / 3600
     total_search_hours = warmup_hours + search_hours
-    if _is_main_process(args):
-        wandb.log({
-            'Search Cost/Search (GPU hours)': search_hours,
-            'Search Cost/Total Search (GPU hours)': total_search_hours,
-        })
     print(f"\nSearch completed in {search_hours:.4f} GPU hours")
     print(f"Total search cost: {total_search_hours:.4f} GPU hours")
 
@@ -653,11 +585,6 @@ def train_architecture_with_latency(
         model_to_load.load_state_dict(state_dict)
 
     final_test_iou = test_architecture(model, test_loader, desc="Final Test")
-    if _is_main_process(args):
-        wandb.log({
-            'LINAS Val/Best_mIoU': best_val_iou,
-            'LINAS Test/Final_mIoU': final_test_iou,
-        })
     print(f"[Final Test] mIoU: {final_test_iou:.4f}")
 
 
@@ -783,22 +710,11 @@ def train_architecture(
         train_loss, train_iou = train_warmup(model, train_loader, loss, optimizer_weight)
         val_iou = test_architecture(model, val_loader, desc="Warmup Val")
 
-        # Only rank 0 logs to wandb
-        if _is_main_process(args):
-            wandb.log({
-                'Architecuter Warmup/Train_Loss': train_loss,
-                'Architecuter Warmup/Train_mIoU': train_iou,
-                'Architecuter Warmup/Val_mIoU': val_iou,
-                'epoch': epoch
-            })
-
         print(f"Epoch {epoch+1}/{args.epochs}, Train Loss: {train_loss:.4f}, Train IOU: {train_iou:.4f}, Val IOU: {val_iou:.4f}")
 
     # Log warmup time
     warmup_end_time = time.time()
     warmup_hours = (warmup_end_time - warmup_start_time) / 3600
-    if _is_main_process(args):
-        wandb.log({'Search Cost/Warmup (GPU hours)': warmup_hours})
     print(f"Warmup completed in {warmup_hours:.4f} GPU hours")
 
     # Track search phase time
@@ -848,43 +764,6 @@ def train_architecture(
 
                 torch.save(model_to_save.state_dict(), save_path)  # Save the model
 
-        # Log alpha values during training for visualization
-        if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
-            alphas = model.module.get_alphas()
-            search_space = model.module.search_space
-        else:
-            alphas = model.get_alphas()
-            search_space = model.search_space
-
-        alpha_log = {}
-        if search_space in ('extended', 'industry'):
-            # For extended search space, log operation and width alphas separately
-            for i, alpha_dict in enumerate(alphas, 1):
-                # Log operation alphas
-                for j, val in enumerate(alpha_dict['op']):
-                    alpha_log[f'Alphas/deconv{i}_op{j}'] = val
-                # Log width alphas
-                for j, val in enumerate(alpha_dict['width']):
-                    alpha_log[f'Alphas/deconv{i}_width{j}'] = val
-        else:
-            # For basic search space
-            for i, alpha_list in enumerate(alphas, 1):
-                for j, val in enumerate(alpha_list):
-                    alpha_log[f'Alphas/deconv{i}_op{j}'] = val
-
-        # Only rank 0 logs to wandb
-        if _is_main_process(args):
-            wandb.log({
-                'Architecture Train/Weight_Loss': train_w_loss,
-                'Architecture Train/Alpha_Loss': train_a_loss,
-                'Architecture Train/Weight_mIoU': train_w_iou,
-                'Architecture Train/Alpha_mIoU': train_a_iou,
-                'Architecture Train/Selected_FLOPs (GFLOPs)': train_a_flops,
-                'Architecture Val/Val_mIoU': val_iou,
-                'epoch': epoch,
-                **alpha_log
-            })
-
         print(
             f"Epoch {epoch+1}/{args.epochs}\n"
             f"[Train W] Weight Loss: {train_w_loss:.4f}, Weight mIoU: {train_w_iou:.4f}\n"
@@ -896,11 +775,6 @@ def train_architecture(
     search_end_time = time.time()
     search_hours = (search_end_time - search_start_time) / 3600
     total_search_hours = warmup_hours + search_hours
-    if _is_main_process(args):
-        wandb.log({
-            'Search Cost/Search (GPU hours)': search_hours,
-            'Search Cost/Total Search (GPU hours)': total_search_hours,
-        })
     print(f"Search completed in {search_hours:.4f} GPU hours")
     print(f"Total search cost: {total_search_hours:.4f} GPU hours")
 
@@ -914,11 +788,6 @@ def train_architecture(
         model_to_load.load_state_dict(state_dict)
 
     final_test_iou = test_architecture(model, test_loader, desc="Final Test")
-    if _is_main_process(args):
-        wandb.log({
-            'Architecture Val/Best_mIoU': best_val_iou,
-            'Architecture Test/Final_mIoU': final_test_iou,
-        })
     print(f"[Final Test] mIoU: {final_test_iou:.4f}")
 
 
@@ -1124,13 +993,6 @@ def train_weight_alpha_with_latency_ps(
         )
 
     alpha_entropy = compute_alpha_entropy(model)
-    if wandb.run is not None and _is_main_process(args):
-        wandb.log({
-            'train/gumbel_temperature': current_temp,
-            'train/gumbel_hard_mode': int(hard_mode),
-            'train/alpha_entropy': alpha_entropy,
-            'epoch': epoch
-        })
 
     return (train_w_loss.avg, train_w_iou.avg, train_a_loss.avg,
             train_a_iou.avg, train_latency.avg)
@@ -1220,13 +1082,6 @@ def train_architecture_with_latency_ps(
         train_loss, train_iou = train_warmup(model, train_loader, loss, optimizer_weight)
         val_iou = test_architecture(model, val_loader, desc="PS Warmup Val")
 
-        if _is_main_process(args):
-            wandb.log({
-                'Architecture Warmup/Train_Loss': train_loss,
-                'Architecture Warmup/Train_mIoU': train_iou,
-                'Architecture Warmup/Val_mIoU': val_iou,
-                'epoch': global_epoch
-            })
         print(f"Epoch {global_epoch+1}, "
               f"Train Loss: {train_loss:.4f}, Train mIoU: {train_iou:.4f}, "
               f"Val mIoU: {val_iou:.4f}")
@@ -1234,8 +1089,6 @@ def train_architecture_with_latency_ps(
 
     warmup_end_time = time.time()
     warmup_hours = (warmup_end_time - warmup_start_time) / 3600
-    if _is_main_process(args):
-        wandb.log({'Search Cost/Warmup (GPU hours)': warmup_hours})
     print(f"Warmup completed in {warmup_hours:.4f} GPU hours")
 
     # === PROGRESSIVE SHRINKING SEARCH PHASES ===
@@ -1281,17 +1134,6 @@ def train_architecture_with_latency_ps(
                     os.makedirs(args.save_dir, exist_ok=True)
                     torch.save(module.state_dict(), save_path)
 
-            if _is_main_process(args):
-                wandb.log({
-                    'LINAS Train/Weight_Loss': train_w_loss,
-                    'LINAS Train/Alpha_Loss': train_a_loss,
-                    'LINAS Train/Weight_mIoU': train_w_iou,
-                    'LINAS Train/Alpha_mIoU': train_a_iou,
-                    'LINAS Train/Latency (ms)': train_latency,
-                    'LINAS Val/Val_mIoU': val_iou,
-                    'epoch': global_epoch,
-                })
-
             print(
                 f"Epoch {global_epoch+1} [{phase.name}]\n"
                 f"[Train W] Loss: {train_w_loss:.4f}, mIoU: {train_w_iou:.4f}\n"
@@ -1305,11 +1147,6 @@ def train_architecture_with_latency_ps(
     search_end_time = time.time()
     search_hours = (search_end_time - search_start_time) / 3600
     total_search_hours = warmup_hours + search_hours
-    if _is_main_process(args):
-        wandb.log({
-            'Search Cost/Search (GPU hours)': search_hours,
-            'Search Cost/Total Search (GPU hours)': total_search_hours,
-        })
     print(f"\nSearch completed in {search_hours:.4f} GPU hours")
     print(f"Total search cost: {total_search_hours:.4f} GPU hours")
 
@@ -1325,9 +1162,4 @@ def train_architecture_with_latency_ps(
     module.set_active_widths(list(range(len(module.width_mults))))
 
     final_test_iou = test_architecture(model, test_loader, desc="Final Test")
-    if _is_main_process(args):
-        wandb.log({
-            'LINAS Val/Best_mIoU': best_val_iou,
-            'LINAS Test/Final_mIoU': final_test_iou,
-        })
     print(f"[Final Test] mIoU: {final_test_iou:.4f}")

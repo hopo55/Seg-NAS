@@ -57,7 +57,7 @@ EPOCHS=2
 #   - industry: standard + industry-specific ops x 3 widths
 SEARCH_SPACE='industry'
 # Pareto mode primary hardware for final retraining
-PRIMARY_HARDWARE='RTX3090'
+PRIMARY_HARDWARE='RTX4090'
 
 # LINAS Settings
 LATENCY_LAMBDA=1.0

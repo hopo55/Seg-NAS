@@ -8,7 +8,6 @@ warnings.filterwarnings("ignore", message=".*_all_gather_base.*")
 from datetime import datetime
 from utils.argument import get_args
 from utils.utils import set_seed
-from utils.wandb_filter import configure_wandb_minimal_filter
 
 from preprocessing import get_roi, get_dataset
 from segmentation import (
@@ -56,7 +55,6 @@ def main():
     # Initialize wandb only on rank 0
     if not hasattr(args, 'rank') or args.rank == 0:
         wandb.init(config=args, project="Seg-NAS", entity="hopo55", name=run_name)
-        configure_wandb_minimal_filter()
     else:
         import os
         os.environ['WANDB_MODE'] = 'disabled'

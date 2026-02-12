@@ -9,6 +9,7 @@ from tqdm import tqdm
 from utils.dataloaders import set_transforms, ImageDataset
 
 from utils.utils import AverageMeter, get_iou_score, measure_inference_time, set_device
+from utils.car_names import to_english_car_name
 
 # train warmup
 def train_opt(model, train_loader, loss, optimizer):
@@ -184,15 +185,6 @@ def train_samplenet(
                 with open(os.path.join(args.log_dir, 'args.txt'), 'w') as f:
                     f.write(args_text)
 
-        # Log training and test metrics to wandb (only rank 0)
-        if not hasattr(args, 'rank') or args.rank == 0:
-            wandb.log({
-                'SampleNet Train/Train_Loss': train_loss,
-                'SampleNet Train/Train_mIoU': train_iou,
-                'SampleNet Val/Val_mIoU': val_iou,
-                'epoch': epoch
-            })
-
         print(f"Epoch {epoch+1}/{args.epochs}, Train Loss: {train_loss:.4f}, Train IoU: {train_iou:.4f}, Val IoU: {val_iou:.4f}")
 
     if best_model_state is not None:
@@ -204,15 +196,12 @@ def train_samplenet(
 
     if not hasattr(args, 'rank') or args.rank == 0:
         wandb.log({
-            'SampleNet Val/Best_mIoU': best_val_iou,
-            'SampleNet Test/Final_mIoU': final_test_iou,
+            'Best_mIoU': final_test_iou,
         })
 
     # Log retrain time
     retrain_end_time = time.time()
     retrain_hours = (retrain_end_time - retrain_start_time) / 3600
-    if not hasattr(args, 'rank') or args.rank == 0:
-        wandb.log({'Search Cost/Retrain (GPU hours)': retrain_hours})
     print(f"Retrain completed in {retrain_hours:.4f} GPU hours")
 
     # Measure inference time (paper-style: warmup + multiple runs)
@@ -226,8 +215,8 @@ def train_samplenet(
     )
     if not hasattr(args, 'rank') or args.rank == 0:
         wandb.log({
-            'Model/Inference_Time_Mean (ms)': mean_time,
-            'Model/Inference_Time_Std (ms)': std_time
+            'Inference_Time_Mean (ms)': mean_time,
+            'Inference_Time_Std (ms)': std_time
         })
     print(f"OptimizedNetwork Inference Time: {mean_time:.4f} ± {std_time:.4f} ms (batch=1)")
 
@@ -238,6 +227,8 @@ def train_samplenet(
         source_dir_name = os.path.basename(os.path.normpath(args.data_dir))
         for test_ind in test_ind_data:
             matching_name = next((name for sublist in test_ind for name in names if name in sublist), None)
+            if matching_name is None:
+                continue
 
             transform = set_transforms(args.resize)
             test_ind_dataset = ImageDataset(
@@ -252,13 +243,14 @@ def train_samplenet(
             # Test mIoU
             test_ind_iou = test_opt(model, test_ind_loader)
 
+            eng_name = to_english_car_name(matching_name)
             if not hasattr(args, 'rank') or args.rank == 0:
                 wandb.log({
-                    f'SampleNet individual Test/Test_mIoU[{matching_name}]': test_ind_iou,
+                    f'{eng_name}/mIoU': test_ind_iou,
                 })
 
             print(
-                f"TEST[{matching_name}], Test IoU: {test_ind_iou:.4f}"
+                f"TEST[{eng_name}], Test IoU: {test_ind_iou:.4f}"
             )
 
     # Explicit cleanup to reduce GPU memory fragmentation between seeds

@@ -7,7 +7,6 @@ from baselines.comparison import run_comparison
 from preprocessing import get_dataset
 from utils.argument import get_args
 from utils.utils import set_seed
-from utils.wandb_filter import configure_wandb_minimal_filter
 
 # Suppress PyTorch internal deprecation warnings
 warnings.filterwarnings("ignore", message=".*_all_gather_base.*")
@@ -28,7 +27,6 @@ def main():
     wandb_config = vars(args).copy()
     wandb_config["mode"] = "comparison"
     wandb.init(config=wandb_config, project="Seg-NAS", entity="hopo55", name=run_name)
-    configure_wandb_minimal_filter()
 
     dataset = get_dataset(args)
     run_comparison(args, dataset)

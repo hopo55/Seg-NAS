@@ -14,6 +14,7 @@ from torch.utils.data import ConcatDataset, DataLoader
 from .models import MODEL_INFO, get_baseline_model
 from utils.utils import AverageMeter, get_iou_score, set_device, get_model_complexity, measure_inference_time
 from utils.dataloaders import set_transforms, ImageDataset
+from utils.car_names import to_english_car_name
 
 def train_baseline(model, train_loader, loss_fn, optimizer):
     """Train baseline model for one epoch."""
@@ -111,14 +112,6 @@ def train_single_baseline(args, model_name, dataset):
             best_test_iou = test_iou
             best_model = copy.deepcopy(model)
 
-        # Log to wandb
-        wandb.log({
-            f'Baseline/{model_name}/Train_Loss': train_loss,
-            f'Baseline/{model_name}/Train_mIoU': train_iou,
-            f'Baseline/{model_name}/Test_mIoU': test_iou,
-            'epoch': epoch
-        })
-
         print(f"Epoch {epoch+1}/{args.epochs}, Train Loss: {train_loss:.4f}, "
               f"Train mIoU: {train_iou:.4f}, Test mIoU: {test_iou:.4f}")
 
@@ -133,11 +126,11 @@ def train_single_baseline(args, model_name, dataset):
 
     # Log best results
     wandb.log({
-        f'Baseline/{model_name}/Best_mIoU': best_test_iou,
-        f'Baseline/{model_name}/FLOPs (GFLOPs)': gflops,
-        f'Baseline/{model_name}/Parameters (M)': params_m,
-        f'Baseline/{model_name}/Inference_Time_Mean (ms)': mean_time,
-        f'Baseline/{model_name}/Inference_Time_Std (ms)': std_time,
+        'Best_mIoU': best_test_iou,
+        'FLOPs (GFLOPs)': gflops,
+        'Parameters (M)': params_m,
+        'Inference_Time_Mean (ms)': mean_time,
+        'Inference_Time_Std (ms)': std_time,
     })
     print(f"  Inference Time: {mean_time:.4f} ± {std_time:.4f} ms (batch=1)")
 
@@ -164,11 +157,12 @@ def train_single_baseline(args, model_name, dataset):
 
                 # Test mIoU
                 test_ind_iou = test_baseline(best_model, test_ind_loader)
+                eng_name = to_english_car_name(matching_name)
 
                 wandb.log({
-                    f'Baseline/{model_name}/Test_mIoU[{matching_name}]': test_ind_iou,
+                    f'{eng_name}/mIoU': test_ind_iou,
                 })
-                print(f"  {matching_name}: mIoU={test_ind_iou:.4f}")
+                print(f"  {eng_name}: mIoU={test_ind_iou:.4f}")
 
     return {
         'model_name': model_name,
@@ -228,7 +222,5 @@ def run_comparison(args, dataset):
               f"FLOPs: {r['flops']:.4f} | "
               f"Params: {r['params']:.4f} | "
               f"Time: {r['inference_time']:.2f}±{r['inference_std']:.2f}ms")
-
-    wandb.log({"Baseline/Comparison_Table": comparison_table})
 
     return results

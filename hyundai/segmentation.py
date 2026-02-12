@@ -6,7 +6,6 @@ import json
 
 import wandb
 from utils.utils import set_device, check_tensor_in_list, get_model_complexity, AverageMeter, get_iou_score
-from utils.wandb_filter import is_minimal_metrics_enabled
 from nas.supernet_dense import SuperNet, OptimizedNetwork
 from nas.train_supernet import (
     train_architecture, train_architecture_with_latency,
@@ -477,24 +476,11 @@ def train_searched_model(args, opt_model, dataset):
     # Log to wandb as a summary (appears in Overview tab)
     arch_text = "\n".join(arch_desc)
     if _wandb_active(args):
-        if not is_minimal_metrics_enabled():
-            wandb.run.summary['Selected Architecture'] = arch_text
+        wandb.run.summary['Selected Architecture'] = arch_text
 
-            # Also log as individual metrics for easier filtering
-            for i, layer_desc in enumerate(arch_desc, 1):
-                wandb.run.summary[f'Architecture/Layer{i}'] = layer_desc
-
-        # Log alpha values for detailed analysis
-        alphas = supernet.get_alphas()
-        if supernet.search_space in ('extended', 'industry'):
-            for i, alpha_dict in enumerate(alphas, 1):
-                wandb.log({
-                    f'Final_Alphas/deconv{i}_op': alpha_dict['op'],
-                    f'Final_Alphas/deconv{i}_width': alpha_dict['width']
-                })
-        else:
-            for i, alpha_list in enumerate(alphas, 1):
-                wandb.log({f'Final_Alphas/deconv{i}': alpha_list})
+        # Also log as individual metrics for easier filtering
+        for i, layer_desc in enumerate(arch_desc, 1):
+            wandb.run.summary[f'Architecture/Layer{i}'] = layer_desc
 
     opt_model = OptimizedNetwork(opt_model)
     opt_model = opt_model.to(device)
@@ -525,12 +511,11 @@ def train_searched_model(args, opt_model, dataset):
     print(f"OptimizedNetwork - FLOPs: {gflops:.4f} GFLOPs, Parameters: {params_m:.4f} M")
     if _wandb_active(args):
         wandb.log({
-            'Model/FLOPs (GFLOPs)': gflops,
-            'Model/Parameters (M)': params_m
+            'FLOPs (GFLOPs)': gflops,
+            'Parameters (M)': params_m
         })
-        if not is_minimal_metrics_enabled():
-            wandb.run.summary['Model/Final FLOPs (GFLOPs)'] = gflops
-            wandb.run.summary['Model/Final Parameters (M)'] = params_m
+        wandb.run.summary['Model/Final FLOPs (GFLOPs)'] = gflops
+        wandb.run.summary['Model/Final Parameters (M)'] = params_m
 
     loss = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(opt_model.parameters(), lr=args.opt_lr)
@@ -678,16 +663,6 @@ def discover_pareto_architectures(args, model, dataset):
                 print(f"  Refined Val mIoU: {best_refined:.4f}")
                 print(f"  Ops:      {arch.op_indices}")
                 print(f"  Widths:   {arch.width_indices}")
-
-                # Log to wandb (only rank 0)
-                if _wandb_active(args):
-                    wandb.log({
-                        f'Pareto/{hw}/accuracy': arch.accuracy,
-                        f'Pareto/{hw}/refined_val_mIoU': best_refined,
-                        f'Pareto/{hw}/latency_ms': actual_lat,
-                        f'Pareto/{hw}/target_ms': target_lat,
-                        f'Pareto/{hw}/meets_target': actual_lat <= target_lat
-                    })
 
     print("\n" + "=" * 70)
 

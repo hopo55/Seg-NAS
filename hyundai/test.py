@@ -4,6 +4,7 @@ import os
 from torch.utils.data import DataLoader
 from utils.utils import AverageMeter, get_iou_score, set_device
 from utils.dataloaders import set_transforms, HotDataset
+from utils.car_names import to_english_car_name
 
 
 def test_hotstamping(model, test_hot_loader):
@@ -51,12 +52,15 @@ def test_model(args, dataset):
     test_loader = DataLoader(test_dataset, batch_size=args.test_size, shuffle=False)
     test_iou = test_hotstamping(model, test_loader)
 
-    wandb.log({'HotStamping Test/Test_mIoU': test_iou})
+    wandb.log({'Best_mIoU': test_iou})
     print(f"TEST[ALL], Test IoU: {test_iou:.4f}")
 
     names = ["CE", "DF", "GN7 일반", "GN7 파노라마"]
     for test_ind in test_ind_data:
         matching_name = next((name for sublist in test_ind for name in names if name in sublist), None)
+        if matching_name is None:
+            continue
+        eng_name = to_english_car_name(matching_name)
 
         test_ind_dataset = HotDataset(
             test_ind,
@@ -69,5 +73,5 @@ def test_model(args, dataset):
         test_ind_loader = DataLoader(test_ind_dataset, batch_size=args.test_size, shuffle=False)
         test_ind_iou = test_hotstamping(model, test_ind_loader)
 
-        wandb.log({f'HotStamping individual Test/Test_mIoU[{matching_name}]': test_ind_iou})
-        print(f"TEST[{matching_name}], Test IoU: {test_ind_iou:.4f}")
+        wandb.log({f'{eng_name}/mIoU': test_ind_iou})
+        print(f"TEST[{eng_name}], Test IoU: {test_ind_iou:.4f}")
