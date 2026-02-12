@@ -56,6 +56,8 @@ EPOCHS=2
 #   - extended: standard 5 ops x 3 widths
 #   - industry: standard + industry-specific ops x 3 widths
 SEARCH_SPACE='industry'
+# Pareto mode primary hardware for final retraining
+PRIMARY_HARDWARE='RTX3090'
 
 # LINAS Settings
 LATENCY_LAMBDA=1.0
@@ -156,6 +158,7 @@ run_pareto() {
     echo "  Samples: $PARETO_SAMPLES"
     echo "  Eval Subset: $PARETO_EVAL_SUBSET"
     echo "  Hardware Targets: $HW_TARGETS"
+    echo "  Primary Hardware: $PRIMARY_HARDWARE"
     echo "  Progressive Shrinking: $USE_PS"
     echo "========================================"
 
@@ -212,7 +215,7 @@ run_pareto() {
         --pareto_samples $PARETO_SAMPLES \
         --pareto_eval_subset $PARETO_EVAL_SUBSET \
         --pareto_refine_topk $PARETO_REFINE_TOPK \
-        --primary_hardware RTX3090 \
+        --primary_hardware $PRIMARY_HARDWARE \
         $PS_FLAGS
 }
 
@@ -288,6 +291,11 @@ echo "Seeds: ${SEEDS[*]}"
 echo "=============================================="
 
 if [ "$MODE_ARG" = "pareto" ]; then
+    if [[ -z "${HARDWARE_TARGETS[$PRIMARY_HARDWARE]+_}" ]]; then
+        echo "Error: Invalid PRIMARY_HARDWARE '$PRIMARY_HARDWARE'"
+        echo "Valid options: RTX4090, RTX3090, A6000, JetsonOrin, RaspberryPi5, Odroid"
+        exit 1
+    fi
     # Pareto mode: Train once, discover all optimal architectures
     for SEED in "${SEEDS[@]}"; do
         run_pareto $SEED
