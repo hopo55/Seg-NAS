@@ -6,6 +6,7 @@ import json
 
 import wandb
 from utils.utils import set_device, check_tensor_in_list, get_model_complexity, AverageMeter, get_iou_score
+from utils.wandb_filter import is_minimal_metrics_enabled
 from nas.supernet_dense import SuperNet, OptimizedNetwork
 from nas.train_supernet import train_architecture, train_architecture_with_latency
 from nas.train_samplenet import train_samplenet
@@ -329,11 +330,12 @@ def train_searched_model(args, opt_model, dataset):
     # Log to wandb as a summary (appears in Overview tab)
     arch_text = "\n".join(arch_desc)
     if _wandb_active(args):
-        wandb.run.summary['Selected Architecture'] = arch_text
+        if not is_minimal_metrics_enabled():
+            wandb.run.summary['Selected Architecture'] = arch_text
 
-        # Also log as individual metrics for easier filtering
-        for i, layer_desc in enumerate(arch_desc, 1):
-            wandb.run.summary[f'Architecture/Layer{i}'] = layer_desc
+            # Also log as individual metrics for easier filtering
+            for i, layer_desc in enumerate(arch_desc, 1):
+                wandb.run.summary[f'Architecture/Layer{i}'] = layer_desc
 
         # Log alpha values for detailed analysis
         alphas = supernet.get_alphas()
@@ -379,8 +381,9 @@ def train_searched_model(args, opt_model, dataset):
             'Model/FLOPs (GFLOPs)': gflops,
             'Model/Parameters (M)': params_m
         })
-        wandb.run.summary['Model/Final FLOPs (GFLOPs)'] = gflops
-        wandb.run.summary['Model/Final Parameters (M)'] = params_m
+        if not is_minimal_metrics_enabled():
+            wandb.run.summary['Model/Final FLOPs (GFLOPs)'] = gflops
+            wandb.run.summary['Model/Final Parameters (M)'] = params_m
 
     loss = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(opt_model.parameters(), lr=args.opt_lr)
