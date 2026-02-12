@@ -3,6 +3,7 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from nas.search_space import STANDARD_OP_NAMES, get_operation, get_op_flops
 
@@ -159,6 +160,20 @@ class MixedOpWithWidth(nn.Module):
         self.alphas_op = nn.Parameter(torch.zeros(num_ops), requires_grad=True)
         self.alphas_width = nn.Parameter(torch.zeros(num_widths), requires_grad=True)
 
+        # Progressive shrinking: which widths are currently active
+        # By default all widths are active (backward compatible)
+        self._active_width_indices = list(range(num_widths))
+
+    def set_active_widths(self, active_indices):
+        """Set which width multipliers are active for progressive shrinking.
+
+        Args:
+            active_indices: List of indices into self.width_mults that should be active.
+                           e.g., [2] for width=1.0 only, [1, 2] for {0.75, 1.0}
+        """
+        assert all(0 <= i < len(self.width_mults) for i in active_indices)
+        self._active_width_indices = sorted(active_indices)
+
     def clip_alphas(self):
         """No-op: alpha logits remain unconstrained."""
         return
@@ -167,22 +182,28 @@ class MixedOpWithWidth(nn.Module):
         return torch.softmax(self.alphas_op, dim=0)
 
     def _normalized_alphas_width(self):
-        return torch.softmax(self.alphas_width, dim=0)
+        active = self._active_width_indices
+        active_alphas = self.alphas_width[active]
+        return torch.softmax(active_alphas, dim=0)
 
     def _gumbel_softmax_op(self, temperature=1.0, hard=True):
         """Kept for backward compatibility."""
-        return torch.nn.functional.gumbel_softmax(self.alphas_op, tau=temperature, hard=hard)
+        return F.gumbel_softmax(self.alphas_op, tau=temperature, hard=hard)
 
     def _gumbel_softmax_width(self, temperature=1.0, hard=True):
-        """Kept for backward compatibility."""
-        return torch.nn.functional.gumbel_softmax(self.alphas_width, tau=temperature, hard=hard)
+        """Apply Gumbel-Softmax over active width indices only."""
+        active = self._active_width_indices
+        active_alphas = self.alphas_width[active]
+        return F.gumbel_softmax(active_alphas, tau=temperature, hard=hard)
 
     def forward(self, x, temperature=1.0, hard=False):
         outputs = []
         op_weights = self._gumbel_softmax_op(temperature=temperature, hard=hard)
         width_weights = self._gumbel_softmax_width(temperature=temperature, hard=hard)
 
-        for wi, wm in enumerate(self.width_mults):
+        active = self._active_width_indices
+        for local_wi, global_wi in enumerate(active):
+            wm = self.width_mults[global_wi]
             wm_key = f"w{int(wm*100)}"
             ops = self._ops[wm_key]
             bn = getattr(self, f'bn_{wm_key}')
@@ -195,14 +216,18 @@ class MixedOpWithWidth(nn.Module):
                 proj = getattr(self, f'proj_{wm_key}')
                 op_out = proj(op_out)
 
-            outputs.append(width_weights[wi] * op_out)
+            outputs.append(width_weights[local_wi] * op_out)
 
         return sum(outputs)
 
     def get_max_alpha_idx(self):
-        """Return (op_idx, width_idx)"""
-        return (torch.argmax(self.alphas_op).item(),
-                torch.argmax(self.alphas_width).item())
+        """Return (op_idx, width_idx) where width_idx is a global index."""
+        op_idx = torch.argmax(self.alphas_op).item()
+        active = self._active_width_indices
+        active_alphas = self.alphas_width[active]
+        local_best = torch.argmax(active_alphas).item()
+        width_idx = active[local_best]
+        return (op_idx, width_idx)
 
     def get_max_op(self):
         """Return the selected operation module"""
@@ -253,17 +278,19 @@ class MixedOpWithWidth(nn.Module):
 
     def get_sampled_flops(self, H_out, W_out, temperature=1.0):
         """
-        Calculate expected FLOPs under architecture distribution.
+        Calculate expected FLOPs under architecture distribution (active widths only).
         """
         del temperature
         op_weights = self._normalized_alphas_op()
         width_weights = self._normalized_alphas_width()
 
+        active = self._active_width_indices
         total_flops = self.alphas_op.new_tensor(0.0)
-        for wi, wm in enumerate(self.width_mults):
+        for local_wi, global_wi in enumerate(active):
+            wm = self.width_mults[global_wi]
             flops_tensor = self.alphas_op.new_tensor(self._flops_per_op(H_out, W_out, wm))
             width_flops = (op_weights * flops_tensor).sum()
-            total_flops = total_flops + width_weights[wi] * width_flops
+            total_flops = total_flops + width_weights[local_wi] * width_flops
 
         return total_flops
 
@@ -278,25 +305,25 @@ class MixedOpWithWidth(nn.Module):
 
     def get_arch_indices(self):
         """
-        Return architecture indices for latency predictor.
+        Return architecture indices for latency predictor (respects active widths).
 
         Returns:
             op_idx: Selected operation index
-            width_idx: Selected width index
+            width_idx: Selected width index (global)
         """
-        op_idx = torch.argmax(self.alphas_op).item()
-        width_idx = torch.argmax(self.alphas_width).item()
-        return op_idx, width_idx
+        return self.get_max_alpha_idx()
 
     def get_sampled_latency(self, latency_lut, layer_idx, temperature=1.0):
         """
-        Calculate expected latency using LUT and soft architecture weights.
+        Calculate expected latency using LUT and soft architecture weights (active widths only).
         """
         op_weights = self._gumbel_softmax_op(temperature=temperature, hard=False)
         width_weights = self._gumbel_softmax_width(temperature=temperature, hard=False)
 
+        active = self._active_width_indices
         total_latency = self.alphas_op.new_tensor(0.0)
-        for wi, wm in enumerate(self.width_mults):
+        for local_wi, global_wi in enumerate(active):
+            wm = self.width_mults[global_wi]
             latency_per_op = []
             for op_name in self.op_names:
                 lat = latency_lut.get_op_latency(layer_idx, op_name, wm)
@@ -304,7 +331,7 @@ class MixedOpWithWidth(nn.Module):
 
             latency_tensor = self.alphas_op.new_tensor(latency_per_op)
             width_latency = (op_weights * latency_tensor).sum()
-            total_latency = total_latency + width_weights[wi] * width_latency
+            total_latency = total_latency + width_weights[local_wi] * width_latency
 
         return total_latency
 

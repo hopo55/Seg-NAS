@@ -6,7 +6,8 @@ import torch.nn.functional as F
 from tqdm import tqdm
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from typing import Dict, Optional
+from typing import Dict, List, Optional
+from dataclasses import dataclass
 
 from utils.utils import AverageMeter, get_iou_score
 
@@ -917,5 +918,416 @@ def train_architecture(
         wandb.log({
             'Architecture Val/Best_mIoU': best_val_iou,
             'Architecture Test/Final_mIoU': final_test_iou,
+        })
+    print(f"[Final Test] mIoU: {final_test_iou:.4f}")
+
+
+# ============================================================================
+# Progressive Shrinking (OFA-style)
+# ============================================================================
+
+@dataclass
+class PSPhaseConfig:
+    """Configuration for a single Progressive Shrinking phase."""
+    name: str
+    active_width_indices: List[int]
+    epochs: int
+    use_kd: bool = False
+    kd_temperature: float = 4.0
+    kd_alpha: float = 0.5
+
+
+def get_default_ps_phases(total_search_epochs, num_widths):
+    """Create default progressive shrinking phase configuration.
+
+    Divides total_search_epochs into phases:
+      Phase 1 (40%): largest width only
+      Phase 2 (30%): add medium width
+      Phase 3 (30%): all widths
+    """
+    if num_widths <= 1:
+        return [PSPhaseConfig(
+            name="FullSearch",
+            active_width_indices=[0],
+            epochs=total_search_epochs,
+        )]
+
+    e1 = int(total_search_epochs * 0.4)
+    e2 = int(total_search_epochs * 0.3)
+    e3 = total_search_epochs - e1 - e2
+
+    phases = [
+        PSPhaseConfig(
+            name="PS_Phase1_largest",
+            active_width_indices=[num_widths - 1],
+            epochs=e1,
+            use_kd=False,
+        ),
+        PSPhaseConfig(
+            name="PS_Phase2_add_medium",
+            active_width_indices=[num_widths - 2, num_widths - 1],
+            epochs=e2,
+            use_kd=True,
+            kd_temperature=4.0,
+            kd_alpha=0.5,
+        ),
+        PSPhaseConfig(
+            name="PS_Phase3_all",
+            active_width_indices=list(range(num_widths)),
+            epochs=e3,
+            use_kd=True,
+            kd_temperature=4.0,
+            kd_alpha=0.3,
+        ),
+    ]
+    return phases
+
+
+def train_weight_alpha_with_latency_ps(
+    args,
+    model,
+    train_loader,
+    val_loader,
+    loss,
+    optimizer_weight,
+    optimizer_alpha,
+    latency_predictor=None,
+    latency_lut=None,
+    hardware_targets: Optional[Dict[str, float]] = None,
+    epoch=0,
+    phase_config: Optional[PSPhaseConfig] = None,
+):
+    """Progressive Shrinking variant: weight training includes KD loss from teacher."""
+    current_temp = calculate_gumbel_temperature(epoch, args.epochs)
+    hard_mode = get_gumbel_hard_mode(epoch, args.epochs)
+
+    use_kd = phase_config is not None and phase_config.use_kd
+    kd_temp = phase_config.kd_temperature if phase_config else 4.0
+    kd_alpha = phase_config.kd_alpha if phase_config else 0.5
+
+    model.train()
+    train_w_loss = AverageMeter()
+    train_w_iou = AverageMeter()
+    train_a_loss = AverageMeter()
+    train_a_iou = AverageMeter()
+    train_latency = AverageMeter()
+
+    module = model.module if isinstance(model, (torch.nn.DataParallel,
+                                                 torch.nn.parallel.DistributedDataParallel)) else model
+
+    # Phase 1: Train weights with optional KD
+    train_loader_iter = tqdm(train_loader, desc="Train Weight (PS)", total=len(train_loader))
+    for data, labels in train_loader_iter:
+        device = next(model.parameters()).device
+        data, labels = data.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+        batch_size = data.size(0)
+        optimizer_weight.zero_grad()
+        outputs = model(data, temperature=current_temp, hard=hard_mode)
+        task_loss = loss(outputs, labels)
+
+        total_weight_loss = task_loss
+        if use_kd:
+            teacher_output = module.forward_teacher(data)
+            kd_loss = F.kl_div(
+                F.log_softmax(outputs / kd_temp, dim=1),
+                F.softmax(teacher_output / kd_temp, dim=1),
+                reduction='batchmean'
+            ) * (kd_temp ** 2)
+            total_weight_loss = (1 - kd_alpha) * task_loss + kd_alpha * kd_loss
+
+        train_w_loss.update(task_loss.item(), batch_size)
+        train_w_iou.update(get_iou_score(outputs, labels), batch_size)
+
+        total_weight_loss.backward()
+        optimizer_weight.step()
+        train_loader_iter.set_postfix(
+            loss=f"{train_w_loss.avg:.4f}",
+            iou=f"{train_w_iou.avg:.4f}",
+        )
+
+    # Phase 2: Train alpha with latency constraints (no KD for alpha)
+    val_loader_iter = tqdm(val_loader, desc="Train Alpha (PS)", total=len(val_loader))
+    for data, labels in val_loader_iter:
+        device = next(model.parameters()).device
+        data, labels = data.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+        batch_size = data.size(0)
+        optimizer_alpha.zero_grad()
+        outputs = model(data, temperature=current_temp, hard=hard_mode)
+        ce_loss = loss(outputs, labels)
+
+        # Calculate latency penalty (identical to non-PS version)
+        latency_penalty = torch.tensor(0.0, device=data.device)
+        current_latency_val = 0.0
+
+        if latency_predictor is not None and hardware_targets is not None:
+            from latency import get_hardware_features
+            op_weights, width_weights = module.get_alpha_weights()
+            op_weights = op_weights.unsqueeze(0)
+            width_weights = width_weights.unsqueeze(0)
+            for hw_name, target_lat in hardware_targets.items():
+                hw_features = get_hardware_features(hw_name).to(data.device).unsqueeze(0)
+                pred_lat, _, _ = latency_predictor.forward_continuous(
+                    hw_features, op_weights, width_weights
+                )
+                lat_loss = F.relu(pred_lat - target_lat)
+                latency_penalty = latency_penalty + args.latency_lambda * lat_loss.squeeze()
+            primary_hw = list(hardware_targets.keys())[0]
+            hw_features = get_hardware_features(primary_hw).to(data.device).unsqueeze(0)
+            with torch.no_grad():
+                op_indices, width_indices = module.get_arch_indices()
+                pred_lat, _, _ = latency_predictor(
+                    hw_features,
+                    op_indices.unsqueeze(0).to(data.device),
+                    width_indices.unsqueeze(0).to(data.device)
+                )
+                current_latency_val = pred_lat.item()
+        elif latency_lut is not None:
+            target_latency = getattr(args, "target_latency", None)
+            sampled_latency = module.get_sampled_latency(latency_lut, temperature=current_temp)
+            current_latency_val = module.get_argmax_latency(latency_lut)
+            if target_latency is not None and target_latency > 0:
+                latency_penalty = args.latency_lambda * F.relu(sampled_latency - target_latency)
+            else:
+                latency_penalty = args.latency_lambda * sampled_latency
+        else:
+            sampled_flops = module.get_sampled_flops(args.resize, temperature=current_temp)
+            argmax_flops = module.get_argmax_flops(args.resize)
+            target_flops = getattr(args, "target_flops", None)
+            flops_norm_base = getattr(args, "flops_norm_base", None)
+            if target_flops is not None and target_flops > 0:
+                flops_diff = torch.abs(sampled_flops - target_flops)
+                if flops_norm_base is not None and flops_norm_base > 0:
+                    latency_penalty = args.flops_lambda * (flops_diff / flops_norm_base)
+                else:
+                    latency_penalty = args.flops_lambda * flops_diff
+            else:
+                if flops_norm_base is not None and flops_norm_base > 0:
+                    latency_penalty = args.flops_lambda * (sampled_flops / flops_norm_base)
+                else:
+                    latency_penalty = args.flops_lambda * sampled_flops
+            current_latency_val = argmax_flops
+
+        total_loss = ce_loss + latency_penalty
+        train_a_loss.update(ce_loss.item(), batch_size)
+        train_latency.update(current_latency_val, batch_size)
+        train_a_iou.update(get_iou_score(outputs, labels), batch_size)
+
+        total_loss.backward()
+        nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
+        optimizer_alpha.step()
+        module.clip_alphas()
+
+        val_loader_iter.set_postfix(
+            loss=f"{train_a_loss.avg:.4f}",
+            lat=f"{train_latency.avg:.2f}ms",
+            iou=f"{train_a_iou.avg:.4f}",
+        )
+
+    alpha_entropy = compute_alpha_entropy(model)
+    if wandb.run is not None and _is_main_process(args):
+        wandb.log({
+            'train/gumbel_temperature': current_temp,
+            'train/gumbel_hard_mode': int(hard_mode),
+            'train/alpha_entropy': alpha_entropy,
+            'epoch': epoch
+        })
+
+    return (train_w_loss.avg, train_w_iou.avg, train_a_loss.avg,
+            train_a_iou.avg, train_latency.avg)
+
+
+def train_architecture_with_latency_ps(
+    args,
+    model,
+    dataset,
+    loss,
+    optimizer_alpha,
+    optimizer_weight,
+    latency_predictor=None,
+    latency_lut=None,
+    hardware_targets: Optional[Dict[str, float]] = None,
+    ps_phases: Optional[List[PSPhaseConfig]] = None,
+):
+    """Train architecture with Progressive Shrinking + latency-aware optimization."""
+    train_dataset, val_dataset, test_dataset, _ = dataset
+
+    # Create samplers for DDP
+    from torch.utils.data.distributed import DistributedSampler
+    if hasattr(args, 'distributed') and args.distributed:
+        train_sampler = DistributedSampler(
+            train_dataset, num_replicas=args.world_size, rank=args.rank,
+            shuffle=True, drop_last=True
+        )
+        val_sampler = DistributedSampler(
+            val_dataset, num_replicas=args.world_size, rank=args.rank,
+            shuffle=False, drop_last=True
+        )
+        test_sampler = DistributedSampler(
+            test_dataset, num_replicas=args.world_size, rank=args.rank,
+            shuffle=False
+        )
+        shuffle_train = False
+    else:
+        train_sampler = None
+        val_sampler = None
+        test_sampler = None
+        shuffle_train = True
+
+    train_loader = DataLoader(
+        train_dataset, batch_size=args.train_size, shuffle=shuffle_train,
+        sampler=train_sampler, num_workers=4, pin_memory=True
+    )
+    val_loader = DataLoader(
+        val_dataset, batch_size=args.train_size, shuffle=False,
+        sampler=val_sampler, num_workers=4, pin_memory=True
+    )
+    test_loader = DataLoader(
+        test_dataset, batch_size=args.test_size, shuffle=False,
+        sampler=test_sampler, num_workers=4, pin_memory=True
+    )
+
+    module = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
+
+    # Determine PS phases
+    if ps_phases is None:
+        total_search_epochs = args.epochs - args.warmup_epochs
+        num_widths = len(module.width_mults)
+        ps_phases = get_default_ps_phases(total_search_epochs, num_widths)
+
+    # Apply custom KD settings from args
+    ps_kd_alpha = getattr(args, 'ps_kd_alpha', None)
+    ps_kd_temperature = getattr(args, 'ps_kd_temperature', None)
+    if ps_kd_alpha is not None or ps_kd_temperature is not None:
+        for phase in ps_phases:
+            if phase.use_kd:
+                if ps_kd_alpha is not None:
+                    phase.kd_alpha = ps_kd_alpha
+                if ps_kd_temperature is not None:
+                    phase.kd_temperature = ps_kd_temperature
+
+    best_val_iou = -float('inf')
+    global_epoch = 0
+
+    # === WARMUP PHASE (width=1.0 only) ===
+    max_width_idx = len(module.width_mults) - 1
+    module.set_active_widths([max_width_idx])
+
+    warmup_start_time = time.time()
+    print("Progressive Shrinking Warmup (width=1.0 only)...")
+    for epoch in range(args.warmup_epochs):
+        if hasattr(args, 'distributed') and args.distributed:
+            train_sampler.set_epoch(global_epoch)
+        train_loss, train_iou = train_warmup(model, train_loader, loss, optimizer_weight)
+        val_iou = test_architecture(model, val_loader, desc="PS Warmup Val")
+
+        if _is_main_process(args):
+            wandb.log({
+                'Architecture Warmup/Train_Loss': train_loss,
+                'Architecture Warmup/Train_mIoU': train_iou,
+                'Architecture Warmup/Val_mIoU': val_iou,
+                'epoch': global_epoch
+            })
+        print(f"Epoch {global_epoch+1}, "
+              f"Train Loss: {train_loss:.4f}, Train mIoU: {train_iou:.4f}, "
+              f"Val mIoU: {val_iou:.4f}")
+        global_epoch += 1
+
+    warmup_end_time = time.time()
+    warmup_hours = (warmup_end_time - warmup_start_time) / 3600
+    if _is_main_process(args):
+        wandb.log({'Search Cost/Warmup (GPU hours)': warmup_hours})
+    print(f"Warmup completed in {warmup_hours:.4f} GPU hours")
+
+    # === PROGRESSIVE SHRINKING SEARCH PHASES ===
+    search_start_time = time.time()
+
+    for phase_idx, phase in enumerate(ps_phases):
+        print(f"\n{'='*60}")
+        print(f"Progressive Shrinking: {phase.name}")
+        print(f"  Active widths: {[module.width_mults[i] for i in phase.active_width_indices]}")
+        print(f"  Epochs: {phase.epochs}")
+        print(f"  KD: {phase.use_kd}" +
+              (f" (alpha={phase.kd_alpha}, temp={phase.kd_temperature})" if phase.use_kd else ""))
+        print(f"{'='*60}")
+
+        module.set_active_widths(phase.active_width_indices)
+
+        # Reset alpha optimizer for fresh momentum on newly activated width alphas
+        alpha_params = module.get_alpha_params()
+        optimizer_alpha = torch.optim.Adam(alpha_params, lr=args.alpha_lr)
+
+        for phase_epoch in range(phase.epochs):
+            if hasattr(args, 'distributed') and args.distributed:
+                train_sampler.set_epoch(global_epoch)
+
+            train_w_loss, train_w_iou, train_a_loss, train_a_iou, train_latency = (
+                train_weight_alpha_with_latency_ps(
+                    args, model, train_loader, val_loader, loss,
+                    optimizer_weight, optimizer_alpha,
+                    latency_predictor=latency_predictor,
+                    latency_lut=latency_lut,
+                    hardware_targets=hardware_targets,
+                    epoch=global_epoch,
+                    phase_config=phase,
+                )
+            )
+
+            val_iou = test_architecture(model, val_loader, desc=f"{phase.name} Val")
+
+            if val_iou > best_val_iou:
+                best_val_iou = val_iou
+                if _is_main_process(args):
+                    save_path = os.path.join(args.save_dir, 'best_architecture.pt')
+                    os.makedirs(args.save_dir, exist_ok=True)
+                    torch.save(module.state_dict(), save_path)
+
+            if _is_main_process(args):
+                wandb.log({
+                    'LINAS Train/Weight_Loss': train_w_loss,
+                    'LINAS Train/Alpha_Loss': train_a_loss,
+                    'LINAS Train/Weight_mIoU': train_w_iou,
+                    'LINAS Train/Alpha_mIoU': train_a_iou,
+                    'LINAS Train/Latency (ms)': train_latency,
+                    'LINAS Val/Val_mIoU': val_iou,
+                    'epoch': global_epoch,
+                })
+
+            print(
+                f"Epoch {global_epoch+1} [{phase.name}]\n"
+                f"[Train W] Loss: {train_w_loss:.4f}, mIoU: {train_w_iou:.4f}\n"
+                f"[Train A] Loss: {train_a_loss:.4f}, mIoU: {train_a_iou:.4f}, "
+                f"Latency: {train_latency:.2f}ms\n"
+                f"[Val] mIoU: {val_iou:.4f}"
+            )
+            global_epoch += 1
+
+    # Log search time
+    search_end_time = time.time()
+    search_hours = (search_end_time - search_start_time) / 3600
+    total_search_hours = warmup_hours + search_hours
+    if _is_main_process(args):
+        wandb.log({
+            'Search Cost/Search (GPU hours)': search_hours,
+            'Search Cost/Total Search (GPU hours)': total_search_hours,
+        })
+    print(f"\nSearch completed in {search_hours:.4f} GPU hours")
+    print(f"Total search cost: {total_search_hours:.4f} GPU hours")
+
+    # Restore best and evaluate on test
+    if hasattr(args, 'distributed') and args.distributed:
+        torch.distributed.barrier()
+    best_path = os.path.join(args.save_dir, 'best_architecture.pt')
+    if os.path.exists(best_path):
+        state_dict = torch.load(best_path, map_location=next(module.parameters()).device)
+        module.load_state_dict(state_dict)
+
+    # Ensure all widths are active for final evaluation
+    module.set_active_widths(list(range(len(module.width_mults))))
+
+    final_test_iou = test_architecture(model, test_loader, desc="Final Test")
+    if _is_main_process(args):
+        wandb.log({
+            'LINAS Val/Best_mIoU': best_val_iou,
+            'LINAS Test/Final_mIoU': final_test_iou,
         })
     print(f"[Final Test] mIoU: {final_test_iou:.4f}")

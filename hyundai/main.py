@@ -14,6 +14,7 @@ from preprocessing import get_roi, get_dataset
 from segmentation import (
     search_architecture,
     search_architecture_linas,
+    search_architecture_linas_ps,
     train_searched_model,
     search_and_discover_pareto,
     discover_pareto_architectures
@@ -115,7 +116,12 @@ def main():
             print("\n" + "=" * 60)
             print("LINAS: Latency-aware Industrial NAS")
             print("=" * 60)
-            searched_model = search_architecture_linas(args, dataset)
+            use_ps = getattr(args, 'use_progressive_shrinking', False)
+            if use_ps:
+                print("  Progressive Shrinking: ENABLED")
+                searched_model = search_architecture_linas_ps(args, dataset)
+            else:
+                searched_model = search_architecture_linas(args, dataset)
         else:
             print("\n" + "=" * 60)
             print("FLOPs-based NAS")

@@ -70,6 +70,12 @@ HARDWARE_TARGETS[JetsonOrin]=95    # Edge GPU (CUDA)
 HARDWARE_TARGETS[RaspberryPi5]=125 # Edge CPU (ARM Cortex-A76, 32GB/s BW, 8GB)
 HARDWARE_TARGETS[Odroid]=160       # Edge CPU (ARM, 25GB/s BW, 4GB) - slowest
 
+# Progressive Shrinking (OFA-style) Settings
+USE_PS=true                # Set to true to enable progressive shrinking
+PS_PHASE_EPOCHS="20 15 15"  # Epochs per phase: [width=1.0] [0.75,1.0] [0.5,0.75,1.0]
+PS_KD_ALPHA=0.5             # Knowledge distillation loss weight
+PS_KD_TEMPERATURE=4.0       # Knowledge distillation temperature
+
 # Pareto search settings
 PARETO_SAMPLES=1000     # Number of architectures to sample
 PARETO_EVAL_SUBSET=100  # Number to actually evaluate
@@ -116,6 +122,14 @@ for layer_name, layer_info in lut.get('layers', {}).items():
 PY
 }
 
+build_ps_flags() {
+    if [ "$USE_PS" = "true" ]; then
+        echo "--use_progressive_shrinking --ps_phase_epochs $PS_PHASE_EPOCHS --ps_kd_alpha $PS_KD_ALPHA --ps_kd_temperature $PS_KD_TEMPERATURE"
+    else
+        echo ""
+    fi
+}
+
 build_hardware_targets_json() {
     local json="{"
     local first=true
@@ -134,6 +148,7 @@ build_hardware_targets_json() {
 run_pareto() {
     local SEED=$1
     local HW_TARGETS=$(build_hardware_targets_json)
+    local PS_FLAGS=$(build_ps_flags)
 
     echo "========================================"
     echo "PARETO-BASED NAS (RF-DETR Style)"
@@ -141,6 +156,7 @@ run_pareto() {
     echo "  Samples: $PARETO_SAMPLES"
     echo "  Eval Subset: $PARETO_EVAL_SUBSET"
     echo "  Hardware Targets: $HW_TARGETS"
+    echo "  Progressive Shrinking: $USE_PS"
     echo "========================================"
 
     # Check if at least one LUT exists
@@ -196,7 +212,8 @@ run_pareto() {
         --pareto_samples $PARETO_SAMPLES \
         --pareto_eval_subset $PARETO_EVAL_SUBSET \
         --pareto_refine_topk $PARETO_REFINE_TOPK \
-        --primary_hardware RTX3090
+        --primary_hardware RTX3090 \
+        $PS_FLAGS
 }
 
 run_single() {
@@ -204,6 +221,7 @@ run_single() {
     local HARDWARE=$2
     local TARGET_LAT=${HARDWARE_TARGETS[$HARDWARE]}
     local LUT_PATH="${LUT_DIR}/lut_${HARDWARE,,}.json"
+    local PS_FLAGS=$(build_ps_flags)
 
     echo "========================================"
     echo "SINGLE-HARDWARE NAS"
@@ -211,6 +229,7 @@ run_single() {
     echo "  Hardware: $HARDWARE"
     echo "  Target Latency: ${TARGET_LAT}ms"
     echo "  LUT: $LUT_PATH"
+    echo "  Progressive Shrinking: $USE_PS"
     echo "========================================"
 
     if [ ! -f "$LUT_PATH" ]; then
@@ -252,7 +271,8 @@ run_single() {
         --target_latency $TARGET_LAT \
         --primary_hardware $HARDWARE \
         --use_latency \
-        --lut_path $LUT_PATH
+        --lut_path $LUT_PATH \
+        $PS_FLAGS
 }
 
 # =============================================================================

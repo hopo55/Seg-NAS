@@ -94,6 +94,17 @@ def get_args(include_comparison_args=False):
                                  'RaspberryPi5', 'Odroid'],
                         help='List of hardware to consider for Pareto search')
 
+    # Progressive Shrinking (OFA-style)
+    parser.add_argument('--use_progressive_shrinking', action='store_true',
+                        help='Enable progressive shrinking for width training (OFA-style)')
+    parser.add_argument('--ps_phase_epochs', type=int, nargs='+', default=None,
+                        help='Epochs per PS phase (e.g., --ps_phase_epochs 20 15 15). '
+                             'Number of values must match number of width multipliers.')
+    parser.add_argument('--ps_kd_alpha', type=float, default=0.5,
+                        help='Knowledge distillation loss weight (default: 0.5)')
+    parser.add_argument('--ps_kd_temperature', type=float, default=4.0,
+                        help='Knowledge distillation temperature (default: 4.0)')
+
     # Pareto search arguments (RF-DETR style)
     parser.add_argument('--pareto_samples', type=int, default=1000,
                         help='Number of architectures to sample for Pareto discovery (default: 1000)')

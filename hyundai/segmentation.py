@@ -8,7 +8,10 @@ import wandb
 from utils.utils import set_device, check_tensor_in_list, get_model_complexity, AverageMeter, get_iou_score
 from utils.wandb_filter import is_minimal_metrics_enabled
 from nas.supernet_dense import SuperNet, OptimizedNetwork
-from nas.train_supernet import train_architecture, train_architecture_with_latency
+from nas.train_supernet import (
+    train_architecture, train_architecture_with_latency,
+    train_architecture_with_latency_ps, PSPhaseConfig,
+)
 from nas.train_samplenet import train_samplenet
 from nas.pareto_search import ParetoSearcher, print_pareto_summary
 from nas.search_space import STANDARD_OP_NAMES, ALL_OP_NAMES, WIDTH_MULTS, calculate_search_space_size
@@ -294,6 +297,150 @@ def search_architecture_linas(args, dataset):
         latency_predictor=latency_predictor,
         latency_lut=latency_lut,
         hardware_targets=hardware_targets,
+    )
+
+    return model
+
+
+def search_architecture_linas_ps(args, dataset):
+    """LINAS with Progressive Shrinking: OFA-style progressive width training."""
+    # Reuse the same setup as search_architecture_linas
+    local_rank = getattr(args, 'local_rank', None)
+    device = set_device(args.gpu_idx, local_rank=local_rank)
+
+    search_space = getattr(args, 'search_space', 'industry')
+    if search_space == 'basic':
+        raise ValueError("LINAS+PS requires width-aware search space ('extended' or 'industry').")
+    model = SuperNet(n_class=2, search_space=search_space)
+    op_names, width_mults = _describe_search_space(search_space)
+    print(f"LINAS+PS Search Space: {search_space}")
+    print(f"  - {len(op_names)} operations: {', '.join(op_names)}")
+    print(f"  - {len(width_mults)} width multipliers: {list(width_mults)}")
+    print(f"  - Total: {calculate_search_space_size(op_names, list(width_mults)):,} architectures")
+
+    model = model.to(device)
+
+    if hasattr(args, 'distributed') and args.distributed:
+        model = torch.nn.parallel.DistributedDataParallel(
+            model, device_ids=[args.local_rank], output_device=args.local_rank,
+            find_unused_parameters=False
+        )
+        if args.rank == 0:
+            print(f"Using DDP with {args.world_size} GPUs")
+    elif torch.cuda.is_available() and len(args.gpu_idx) >= 2:
+        model = torch.nn.DataParallel(model, device_ids=args.gpu_idx)
+        print(f"Using DataParallel with GPUs: {args.gpu_idx}")
+    else:
+        if device.type == "cuda":
+            print(f"Using single GPU: cuda:{args.gpu_idx[0]}")
+        else:
+            print("Using CPU")
+
+    loss = nn.CrossEntropyLoss()
+
+    alphas_params = [
+        param for name, param in model.named_parameters() if "alpha" in name.lower()
+    ]
+    weight_params = [
+        param for param in model.parameters()
+        if not check_tensor_in_list(param, alphas_params)
+    ]
+
+    optimizer_alpha = torch.optim.Adam(alphas_params, lr=args.alpha_lr)
+    optimizer_weight = torch.optim.Adam(weight_params, lr=args.weight_lr)
+
+    data_name = args.data if isinstance(args.data, str) else "_".join(args.data)
+    timestamp = str(datetime.now().date()) + "_" + datetime.now().strftime("%H_%M_%S")
+    target_lat = getattr(args, 'target_latency', None) or 'min'
+    args.save_dir = f"./hyundai/checkpoints/linas_ps_{data_name}_seed{args.seed}_lat{target_lat}_lambda{args.latency_lambda}/{timestamp}/"
+
+    # Load latency info (same logic as search_architecture_linas)
+    latency_predictor = None
+    latency_lut = None
+    hardware_targets = None
+
+    predictor_path = getattr(args, 'predictor_path', None)
+    if predictor_path and Path(predictor_path).exists():
+        print(f"Loading latency predictor from: {predictor_path}")
+        from latency import CrossHardwareLatencyPredictor
+        latency_predictor = CrossHardwareLatencyPredictor(
+            num_ops=len(op_names), num_widths=len(width_mults)
+        )
+        latency_predictor.load_state_dict(torch.load(predictor_path, map_location=device))
+        latency_predictor = latency_predictor.to(device)
+        latency_predictor.eval()
+        hardware_targets = getattr(args, 'hardware_targets_dict', None)
+        if hardware_targets:
+            print(f"Hardware targets: {hardware_targets}")
+
+    lut_path = getattr(args, 'lut_path', None)
+    if lut_path and Path(lut_path).exists() and latency_predictor is None:
+        print(f"Loading latency LUT from: {lut_path}")
+        from latency import LatencyLUT
+        latency_lut = LatencyLUT(lut_path)
+        print(f"LUT hardware: {latency_lut.hardware_name}")
+
+    if latency_lut is None and latency_predictor is None:
+        lut_dir = getattr(args, 'lut_dir', None)
+        if lut_dir:
+            lut_dir_path = Path(lut_dir)
+            if lut_dir_path.exists():
+                primary_hw = getattr(args, 'primary_hardware', None)
+                candidate = None
+                if primary_hw:
+                    candidate = lut_dir_path / f"lut_{primary_hw.lower()}.json"
+                    if not candidate.exists():
+                        print(f"Warning: LUT not found for primary_hardware={primary_hw}: {candidate}")
+                        candidate = None
+                if candidate is None:
+                    lut_files = sorted(lut_dir_path.glob("lut_*.json"))
+                    if lut_files:
+                        candidate = lut_files[0]
+                        print(f"Using first available LUT in {lut_dir_path}: {candidate.name}")
+                if candidate is not None and candidate.exists():
+                    print(f"Loading latency LUT from: {candidate}")
+                    from latency import LatencyLUT
+                    latency_lut = LatencyLUT(str(candidate))
+                    print(f"LUT hardware: {latency_lut.hardware_name}")
+
+    if latency_predictor is not None:
+        print("\nOptimization: Multi-hardware latency (predictor-based) + Progressive Shrinking")
+    elif latency_lut is not None:
+        target = getattr(args, 'target_latency', None)
+        if target:
+            print(f"\nOptimization: Single-hardware latency (target: {target}ms) + Progressive Shrinking")
+        else:
+            print("\nOptimization: Single-hardware latency (minimize) + Progressive Shrinking")
+    else:
+        print("\nWarning: No latency info provided, falling back to FLOPs + Progressive Shrinking")
+
+    # Build PS phase config from args
+    ps_phases = None
+    ps_phase_epochs = getattr(args, 'ps_phase_epochs', None)
+    if ps_phase_epochs is not None:
+        num_widths = len(width_mults)
+        ps_kd_alpha = getattr(args, 'ps_kd_alpha', 0.5)
+        ps_kd_temperature = getattr(args, 'ps_kd_temperature', 4.0)
+        ps_phases = []
+        for i, ep in enumerate(ps_phase_epochs):
+            # Phase i activates widths from (num_widths - len(ps_phase_epochs) + i) to (num_widths - 1)
+            start_idx = max(0, num_widths - len(ps_phase_epochs) + i)
+            active = list(range(start_idx, num_widths))
+            ps_phases.append(PSPhaseConfig(
+                name=f"PS_Phase{i+1}",
+                active_width_indices=active,
+                epochs=ep,
+                use_kd=(i > 0),
+                kd_temperature=ps_kd_temperature,
+                kd_alpha=ps_kd_alpha,
+            ))
+
+    train_architecture_with_latency_ps(
+        args, model, dataset, loss, optimizer_alpha, optimizer_weight,
+        latency_predictor=latency_predictor,
+        latency_lut=latency_lut,
+        hardware_targets=hardware_targets,
+        ps_phases=ps_phases,
     )
 
     return model

@@ -259,6 +259,36 @@ class SuperNet(nn.Module):
 
         return total_latency
 
+    def set_active_widths(self, active_width_indices):
+        """Set active widths for all decoder layers (progressive shrinking).
+
+        Args:
+            active_width_indices: List of indices into WIDTH_MULTS that should be active.
+                                 e.g., [2] for width=1.0 only
+        """
+        if self.search_space not in ('extended', 'industry'):
+            return
+        for deconv in [self.deconv1, self.deconv2, self.deconv3, self.deconv4, self.deconv5]:
+            deconv.set_active_widths(active_width_indices)
+
+    def get_active_widths(self):
+        """Return current active width indices."""
+        if self.search_space not in ('extended', 'industry'):
+            return [0]
+        return list(self.deconv1._active_width_indices)
+
+    @torch.no_grad()
+    def forward_teacher(self, x):
+        """Forward pass with the largest subnet (width=1.0 only).
+        Used as the teacher for knowledge distillation during progressive shrinking.
+        """
+        original_indices = self.get_active_widths()
+        max_width_idx = len(self.width_mults) - 1
+        self.set_active_widths([max_width_idx])
+        output = self.forward(x, temperature=0.1, hard=True)
+        self.set_active_widths(original_indices)
+        return output
+
     def get_alpha_weights(self):
         """
         Get normalized alpha weights for all layers (for latency predictor).
