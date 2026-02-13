@@ -34,6 +34,8 @@ class Architecture:
     width_indices: List[int]   # Width index per layer [5]
     accuracy: float = 0.0      # mIoU or Dice score
     latencies: Dict[str, float] = None  # {hardware: latency_ms}
+    constraint_violation: float = 0.0
+    feasible: bool = True
 
     def __post_init__(self):
         if self.latencies is None:
@@ -58,7 +60,9 @@ class Architecture:
             'op_indices': self._to_builtin(self.op_indices),
             'width_indices': self._to_builtin(self.width_indices),
             'accuracy': self._to_builtin(self.accuracy),
-            'latencies': self._to_builtin(self.latencies)
+            'latencies': self._to_builtin(self.latencies),
+            'constraint_violation': self._to_builtin(self.constraint_violation),
+            'feasible': self._to_builtin(self.feasible),
         }
 
     @classmethod
@@ -67,7 +71,9 @@ class Architecture:
             op_indices=d['op_indices'],
             width_indices=d['width_indices'],
             accuracy=d['accuracy'],
-            latencies=d['latencies']
+            latencies=d['latencies'],
+            constraint_violation=d.get('constraint_violation', 0.0),
+            feasible=d.get('feasible', True),
         )
 
 
@@ -85,7 +91,8 @@ class ParetoSearcher:
     """
 
     def __init__(self, supernet: nn.Module, luts: Dict[str, LatencyLUT],
-                 num_layers: int = 5, num_ops: Optional[int] = None, num_widths: Optional[int] = None):
+                 num_layers: int = 5, num_ops: Optional[int] = None, num_widths: Optional[int] = None,
+                 latency_predictor: Optional[nn.Module] = None):
         """
         Args:
             supernet: Trained supernet with weight-sharing
@@ -93,10 +100,12 @@ class ParetoSearcher:
             num_layers: Number of decoder layers
             num_ops: Number of operation choices
             num_widths: Number of width choices
+            latency_predictor: Optional latency predictor (for CALOFA metrics)
         """
         self.supernet = supernet
         self.luts = luts
         self.num_layers = num_layers
+        self.latency_predictor = latency_predictor
 
         if hasattr(supernet, 'module'):
             module = supernet.module
@@ -118,6 +127,8 @@ class ParetoSearcher:
 
         self.architectures: List[Architecture] = []
         self.pareto_front: Dict[str, List[Architecture]] = {}  # {hardware: pareto_archs}
+        self.feasible_front: Dict[str, List[Architecture]] = {}
+        self.metrics: Dict[str, float] = {}
 
     def _split_ops_by_cost(self) -> Tuple[List[int], List[int]]:
         light_ops = []
@@ -207,6 +218,116 @@ class ParetoSearcher:
                 architectures.append(self.sample_architecture(strategy))
 
         return architectures
+
+    @staticmethod
+    def _arch_key(arch: Architecture) -> Tuple[Tuple[int, ...], Tuple[int, ...]]:
+        return tuple(int(v) for v in arch.op_indices), tuple(int(v) for v in arch.width_indices)
+
+    def _compute_constraint_violation(
+        self,
+        arch: Architecture,
+        hardware_targets: Dict[str, float],
+        constraint_margin: float = 0.0,
+    ) -> float:
+        if not hardware_targets:
+            return 0.0
+        violations = []
+        for hw, target in hardware_targets.items():
+            lat = float(arch.latencies.get(hw, float('inf')))
+            if not np.isfinite(lat):
+                violations.append(float('inf'))
+            else:
+                violations.append(max(0.0, lat - float(target) - float(constraint_margin)))
+        if not violations:
+            return 0.0
+        if any(not np.isfinite(v) for v in violations):
+            return float('inf')
+        return float(np.mean(violations))
+
+    def _annotate_feasibility(
+        self,
+        archs: List[Architecture],
+        hardware_targets: Dict[str, float],
+        constraint_margin: float = 0.0,
+    ):
+        for arch in archs:
+            arch.constraint_violation = self._compute_constraint_violation(
+                arch, hardware_targets, constraint_margin=constraint_margin
+            )
+            arch.feasible = bool(np.isfinite(arch.constraint_violation) and arch.constraint_violation <= 0.0)
+
+    def _rank_population(self, archs: List[Architecture]) -> List[Architecture]:
+        return sorted(
+            archs,
+            key=lambda a: (
+                0 if a.feasible else 1,
+                float(a.constraint_violation),
+                -float(a.accuracy),
+                float(np.mean(list(a.latencies.values()))) if a.latencies else float('inf'),
+            )
+        )
+
+    def _crossover(self, a: Architecture, b: Architecture, crossover_prob: float = 0.5) -> Architecture:
+        child_ops = []
+        child_widths = []
+        for oa, ob, wa, wb in zip(a.op_indices, b.op_indices, a.width_indices, b.width_indices):
+            if np.random.rand() < crossover_prob:
+                child_ops.append(int(oa))
+                child_widths.append(int(wa))
+            else:
+                child_ops.append(int(ob))
+                child_widths.append(int(wb))
+        return Architecture(op_indices=child_ops, width_indices=child_widths)
+
+    def _mutate(self, arch: Architecture, mutation_prob: float = 0.1) -> Architecture:
+        new_ops = [int(v) for v in arch.op_indices]
+        new_widths = [int(v) for v in arch.width_indices]
+        for i in range(self.num_layers):
+            if np.random.rand() < mutation_prob:
+                new_ops[i] = int(np.random.randint(0, self.num_ops))
+            if np.random.rand() < mutation_prob:
+                new_widths[i] = int(np.random.randint(0, self.num_widths))
+        return Architecture(op_indices=new_ops, width_indices=new_widths)
+
+    @staticmethod
+    def _rank_corr(values_x: List[float], values_y: List[float]) -> float:
+        if len(values_x) < 2 or len(values_y) < 2:
+            return 0.0
+        x = np.asarray(values_x, dtype=np.float64)
+        y = np.asarray(values_y, dtype=np.float64)
+        if np.std(x) < 1e-12 or np.std(y) < 1e-12:
+            return 0.0
+        x_rank = np.argsort(np.argsort(x))
+        y_rank = np.argsort(np.argsort(y))
+        corr = np.corrcoef(x_rank, y_rank)[0, 1]
+        return float(np.nan_to_num(corr, nan=0.0))
+
+    def _estimate_latency_rank_correlation(self, archs: List[Architecture]) -> Dict[str, float]:
+        if self.latency_predictor is None or not archs:
+            return {}
+        device = next(self.latency_predictor.parameters()).device
+        self.latency_predictor.eval()
+        rank_corr = {}
+        with torch.no_grad():
+            for hw_name in self.luts.keys():
+                pred_vals = []
+                lut_vals = []
+                for arch in archs:
+                    ops = torch.tensor(arch.op_indices, dtype=torch.long, device=device)
+                    widths = torch.tensor(arch.width_indices, dtype=torch.long, device=device)
+                    if hasattr(self.latency_predictor, 'predict_for_hardware_with_uncertainty'):
+                        pred_lat, _ = self.latency_predictor.predict_for_hardware_with_uncertainty(hw_name, ops, widths)
+                    else:
+                        pred_lat = self.latency_predictor.predict_for_hardware(hw_name, ops, widths)
+                    pred_vals.append(float(pred_lat.squeeze().item()))
+                    lut_vals.append(float(arch.latencies.get(hw_name, float('inf'))))
+                finite_pairs = [(p, l) for p, l in zip(pred_vals, lut_vals) if np.isfinite(l)]
+                if len(finite_pairs) < 2:
+                    rank_corr[f'latency_rank_corr/{hw_name}'] = 0.0
+                else:
+                    pvals, lvals = zip(*finite_pairs)
+                    rank_corr[f'latency_rank_corr/{hw_name}'] = self._rank_corr(list(pvals), list(lvals))
+        return rank_corr
 
     @torch.no_grad()
     def evaluate_architecture(self, arch: Architecture, val_loader,
@@ -388,6 +509,99 @@ class ParetoSearcher:
 
         return self.pareto_front
 
+    def discover_pareto_curve_calofa(
+        self,
+        val_loader,
+        device: torch.device,
+        num_samples: int = 1000,
+        eval_subset: int = 100,
+        hardware_targets: Optional[Dict[str, float]] = None,
+        population_size: int = 64,
+        generations: int = 8,
+        mutation_prob: float = 0.1,
+        crossover_prob: float = 0.5,
+        constraint_margin: float = 0.0,
+    ) -> Dict[str, List[Architecture]]:
+        """
+        CALOFA search:
+          1) mixed sampling
+          2) initial WS evaluation on diverse subset
+          3) feasible-first evolutionary refinement
+          4) Pareto extraction + feasible front extraction
+        """
+        if hardware_targets is None:
+            hardware_targets = {}
+
+        print(f"Sampling {num_samples} architectures (CALOFA)...")
+        all_archs = self.sample_architectures(num_samples, strategy='mixed')
+
+        print("Computing latencies...")
+        for arch in tqdm(all_archs):
+            arch.latencies = self.compute_latencies(arch)
+
+        print(f"Selecting {eval_subset} diverse architectures for initial evaluation...")
+        eval_archs = self._select_diverse_subset(all_archs, eval_subset)
+        print("Evaluating initial accuracy with weight-sharing...")
+        for arch in tqdm(eval_archs):
+            arch.accuracy = self.evaluate_architecture(arch, val_loader, device)
+
+        self._annotate_feasibility(eval_archs, hardware_targets, constraint_margin=constraint_margin)
+
+        population_size = max(4, int(population_size))
+        population = self._rank_population(eval_archs)[:population_size]
+        seen = {self._arch_key(a) for a in population}
+
+        print(f"Evolutionary refinement: population={population_size}, generations={generations}")
+        for gen in range(int(max(1, generations))):
+            ranked = self._rank_population(population)
+            parent_pool = ranked[:max(2, min(len(ranked), population_size // 2))]
+
+            children = []
+            attempts = 0
+            max_attempts = population_size * 30
+            while len(children) < population_size and attempts < max_attempts:
+                attempts += 1
+                pa = parent_pool[np.random.randint(0, len(parent_pool))]
+                pb = parent_pool[np.random.randint(0, len(parent_pool))]
+                child = self._crossover(pa, pb, crossover_prob=crossover_prob)
+                child = self._mutate(child, mutation_prob=mutation_prob)
+                k = self._arch_key(child)
+                if k in seen:
+                    continue
+                child.latencies = self.compute_latencies(child)
+                child.constraint_violation = self._compute_constraint_violation(
+                    child, hardware_targets, constraint_margin=constraint_margin
+                )
+                child.feasible = bool(np.isfinite(child.constraint_violation) and child.constraint_violation <= 0.0)
+                child.accuracy = self.evaluate_architecture(child, val_loader, device)
+                children.append(child)
+                seen.add(k)
+
+            population = self._rank_population(population + children)[:population_size]
+            feasible_count = sum(1 for a in population if a.feasible)
+            best_acc = max((a.accuracy for a in population), default=0.0)
+            print(f"  Gen {gen+1}/{generations}: feasible={feasible_count}/{len(population)}, best_acc={best_acc:.4f}")
+
+        self.architectures = population
+
+        print("Extracting Pareto fronts...")
+        self.pareto_front = {}
+        self.feasible_front = {}
+        for hw_name in self.luts.keys():
+            full_front = self._extract_pareto_front(population, hw_name)
+            self.pareto_front[hw_name] = full_front
+            target = hardware_targets.get(hw_name)
+            if target is None:
+                self.feasible_front[hw_name] = list(full_front)
+            else:
+                bound = float(target) + float(constraint_margin)
+                self.feasible_front[hw_name] = [
+                    a for a in full_front if a.latencies.get(hw_name, float('inf')) <= bound
+                ]
+            print(f"  {hw_name}: pareto={len(self.pareto_front[hw_name])}, feasible={len(self.feasible_front[hw_name])}")
+
+        return self.pareto_front
+
     def _select_diverse_subset(self, archs: List[Architecture],
                                 n: int) -> List[Architecture]:
         """Select diverse subset across all hardware latency spaces."""
@@ -468,6 +682,121 @@ class ParetoSearcher:
 
         return pareto
 
+    @staticmethod
+    def _compute_hv_2d(points: List[Tuple[float, float]]) -> float:
+        """
+        Hypervolume for rectangles [lat, lat_ref] x [acc_ref, acc].
+        Points are (latency, accuracy), with lower latency / higher accuracy preferred.
+        """
+        finite_points = [(float(lat), float(acc)) for lat, acc in points if np.isfinite(lat) and np.isfinite(acc)]
+        if not finite_points:
+            return 0.0
+
+        finite_points.sort(key=lambda x: x[0])
+        lats = np.array([p[0] for p in finite_points], dtype=np.float64)
+        accs = np.array([p[1] for p in finite_points], dtype=np.float64)
+
+        lat_ref = float(np.max(lats) * 1.05 + 1e-6)
+        acc_ref = float(np.min(accs) - 0.01)
+
+        area = 0.0
+        prev_lat = float(np.min(lats))
+        best_acc = acc_ref
+        for lat, acc in finite_points:
+            if lat > prev_lat:
+                area += max(0.0, best_acc - acc_ref) * (lat - prev_lat)
+                prev_lat = lat
+            if acc > best_acc:
+                best_acc = acc
+        if lat_ref > prev_lat:
+            area += max(0.0, best_acc - acc_ref) * (lat_ref - prev_lat)
+        return float(max(0.0, area))
+
+    @staticmethod
+    def _compute_igd_2d(reference: List[Tuple[float, float]], approx: List[Tuple[float, float]]) -> float:
+        """
+        IGD in normalized (latency, accuracy) space.
+        """
+        ref_pts = np.array([(lat, acc) for lat, acc in reference if np.isfinite(lat) and np.isfinite(acc)], dtype=np.float64)
+        app_pts = np.array([(lat, acc) for lat, acc in approx if np.isfinite(lat) and np.isfinite(acc)], dtype=np.float64)
+        if ref_pts.size == 0:
+            return 0.0
+        if app_pts.size == 0:
+            return float('inf')
+
+        all_pts = np.vstack([ref_pts, app_pts])
+        mins = np.min(all_pts, axis=0, keepdims=True)
+        maxs = np.max(all_pts, axis=0, keepdims=True)
+        denom = np.maximum(maxs - mins, 1e-12)
+
+        ref_n = (ref_pts - mins) / denom
+        app_n = (app_pts - mins) / denom
+
+        dists = []
+        for rp in ref_n:
+            dist = np.linalg.norm(app_n - rp[None, :], axis=1).min()
+            dists.append(dist)
+        return float(np.mean(dists))
+
+    def compute_quality_metrics(
+        self,
+        hardware_targets: Optional[Dict[str, float]] = None,
+        constraint_margin: float = 0.0,
+    ) -> Dict[str, float]:
+        """
+        Compute Pareto quality metrics (HV/IGD + feasible statistics + optional rank correlation).
+        """
+        metrics: Dict[str, float] = {}
+        if hardware_targets is None:
+            hardware_targets = {}
+
+        if self.architectures:
+            violations = [
+                self._compute_constraint_violation(a, hardware_targets, constraint_margin=constraint_margin)
+                for a in self.architectures
+            ]
+            finite_violations = [v for v in violations if np.isfinite(v)]
+            if finite_violations:
+                metrics['constraint_violation_mean_ms'] = float(np.mean(finite_violations))
+                metrics['constraint_violation_rate'] = float(np.mean([1.0 if v > 0 else 0.0 for v in finite_violations]))
+                metrics['feasible_ratio'] = float(np.mean([1.0 if v <= 0 else 0.0 for v in finite_violations]))
+            else:
+                metrics['constraint_violation_mean_ms'] = 0.0
+                metrics['constraint_violation_rate'] = 1.0
+                metrics['feasible_ratio'] = 0.0
+
+        hv_values = []
+        igd_values = []
+        for hw_name in self.luts.keys():
+            full_front = self.pareto_front.get(hw_name, [])
+            feas_front = self.feasible_front.get(hw_name, full_front)
+
+            full_points = [(a.latencies.get(hw_name, float('inf')), a.accuracy) for a in full_front]
+            feas_points = [(a.latencies.get(hw_name, float('inf')), a.accuracy) for a in feas_front]
+
+            hv_full = self._compute_hv_2d(full_points)
+            hv_feas = self._compute_hv_2d(feas_points)
+            igd_feas = self._compute_igd_2d(full_points, feas_points)
+
+            metrics[f'hv/{hw_name}/global'] = float(hv_full)
+            metrics[f'hv/{hw_name}/feasible'] = float(hv_feas)
+            metrics[f'igd/{hw_name}/feasible_to_global'] = float(igd_feas) if np.isfinite(igd_feas) else -1.0
+            metrics[f'front_size/{hw_name}/global'] = float(len(full_front))
+            metrics[f'front_size/{hw_name}/feasible'] = float(len(feas_front))
+
+            hv_values.append(hv_feas)
+            if np.isfinite(igd_feas):
+                igd_values.append(igd_feas)
+
+        if hv_values:
+            metrics['hv/feasible_mean'] = float(np.mean(hv_values))
+        if igd_values:
+            metrics['igd/feasible_mean'] = float(np.mean(igd_values))
+
+        metrics.update(self._estimate_latency_rank_correlation(self.architectures))
+        self.metrics = metrics
+        return metrics
+
     def select_architecture(self, hw_name: str, target_latency: float,
                            prefer: str = 'accuracy') -> Optional[Architecture]:
         """
@@ -482,19 +811,25 @@ class ParetoSearcher:
         Returns:
             Selected architecture or None if no valid architecture
         """
-        if hw_name not in self.pareto_front:
+        candidate_front = self.feasible_front.get(hw_name) if self.feasible_front else None
+        if candidate_front:
+            front = candidate_front
+        else:
+            front = self.pareto_front.get(hw_name, [])
+
+        if not front:
             print(f"Warning: No Pareto front for {hw_name}")
             return None
 
         valid_archs = [
-            arch for arch in self.pareto_front[hw_name]
+            arch for arch in front
             if arch.latencies.get(hw_name, float('inf')) <= target_latency
         ]
 
         if not valid_archs:
             print(f"Warning: No architecture meets latency constraint {target_latency}ms")
             # Return fastest architecture as fallback
-            return self.pareto_front[hw_name][0] if self.pareto_front[hw_name] else None
+            return front[0] if front else None
 
         if prefer == 'accuracy':
             # Select highest accuracy among valid
@@ -510,7 +845,12 @@ class ParetoSearcher:
             'pareto_fronts': {
                 hw: [a.to_dict() for a in archs]
                 for hw, archs in self.pareto_front.items()
-            }
+            },
+            'feasible_fronts': {
+                hw: [a.to_dict() for a in archs]
+                for hw, archs in self.feasible_front.items()
+            },
+            'metrics': Architecture._to_builtin(self.metrics),
         }
 
         with open(save_path, 'w') as f:
@@ -528,6 +868,11 @@ class ParetoSearcher:
             hw: [Architecture.from_dict(d) for d in archs]
             for hw, archs in results['pareto_fronts'].items()
         }
+        self.feasible_front = {
+            hw: [Architecture.from_dict(d) for d in archs]
+            for hw, archs in results.get('feasible_fronts', {}).items()
+        }
+        self.metrics = results.get('metrics', {})
 
         print(f"Loaded {len(self.architectures)} architectures from {load_path}")
 

@@ -255,7 +255,8 @@ class CrossHardwareLatencyPredictor(nn.Module):
     """
 
     def __init__(self, embed_dim: int = 64, num_heads: int = 4,
-                 num_layers: int = 5, num_ops: int = 5, num_widths: int = 3):
+                 num_layers: int = 5, num_ops: int = 5, num_widths: int = 3,
+                 predict_uncertainty: bool = False):
         """
         Args:
             embed_dim: Embedding dimension
@@ -263,11 +264,13 @@ class CrossHardwareLatencyPredictor(nn.Module):
             num_layers: Number of decoder layers
             num_ops: Number of operation choices
             num_widths: Number of width choices
+            predict_uncertainty: Whether to predict aleatoric latency uncertainty
         """
         super().__init__()
 
         self.embed_dim = embed_dim
         self.num_layers = num_layers
+        self.predict_uncertainty = predict_uncertainty
 
         # Hardware encoder
         self.hw_encoder = HardwareEncoder(embed_dim)
@@ -303,42 +306,67 @@ class CrossHardwareLatencyPredictor(nn.Module):
             nn.Linear(32, 1)
         )
 
+        # Optional uncertainty head (predicts log-variance of total latency)
+        self.uncertainty_head = None
+        if self.predict_uncertainty:
+            self.uncertainty_head = nn.Sequential(
+                nn.Linear(embed_dim * 2, embed_dim // 2),
+                nn.ReLU(),
+                nn.Linear(embed_dim // 2, 1)
+            )
+
+    def _predict_from_embeddings(
+        self,
+        hw_emb: torch.Tensor,
+        arch_emb: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        """Predict mean latency and optional uncertainty from HW/Arch embeddings."""
+        fused, attn_weights = self.cross_attn(hw_emb, arch_emb, arch_emb)
+        layer_latencies = self.layer_head(arch_emb).squeeze(-1)
+
+        combined = torch.cat([hw_emb.squeeze(1), fused.squeeze(1)], dim=-1)
+        total_latency = self.total_head(combined)
+
+        latency_std = None
+        if self.uncertainty_head is not None:
+            # Clamp log-variance for numerical stability and convert to std.
+            log_var = self.uncertainty_head(combined).clamp(min=-10.0, max=5.0)
+            latency_std = torch.exp(0.5 * log_var)
+
+        return total_latency, layer_latencies, attn_weights, latency_std
+
     def forward(self, hw_features: torch.Tensor,
                 op_indices: torch.Tensor,
                 width_indices: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Predict latency.
+        Predict mean latency (legacy-compatible API).
+        """
+        hw_emb = self.hw_encoder(hw_features).unsqueeze(1)
+        arch_emb = self.arch_encoder(op_indices, width_indices)
+        total_latency, layer_latencies, attn_weights, _ = self._predict_from_embeddings(hw_emb, arch_emb)
+        return total_latency, layer_latencies, attn_weights
 
-        Args:
-            hw_features: [batch, 4] - hardware specs
-            op_indices: [batch, num_layers] - selected op per layer
-            width_indices: [batch, num_layers] - selected width per layer
+    def forward_with_uncertainty(
+        self,
+        hw_features: torch.Tensor,
+        op_indices: torch.Tensor,
+        width_indices: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Predict mean and std latency.
 
         Returns:
-            total_latency: [batch, 1] - predicted total latency (ms)
-            layer_latencies: [batch, num_layers] - per-layer latencies
-            attn_weights: [batch, 1, num_layers] - attention weights
+            total_latency: [B, 1]
+            latency_std: [B, 1]
+            layer_latencies: [B, L]
+            attn_weights: [B, 1, L]
         """
-        # Encode hardware
-        hw_emb = self.hw_encoder(hw_features)  # [B, D]
-        hw_emb = hw_emb.unsqueeze(1)  # [B, 1, D]
-
-        # Encode architecture
-        arch_emb = self.arch_encoder(op_indices, width_indices)  # [B, L, D]
-
-        # Cross-attention: HW queries, Arch keys/values
-        fused, attn_weights = self.cross_attn(
-            hw_emb, arch_emb, arch_emb
-        )  # fused: [B, 1, D], attn: [B, 1, L]
-
-        # Predict per-layer latency
-        layer_latencies = self.layer_head(arch_emb).squeeze(-1)  # [B, L]
-
-        # Predict total latency (combine HW embedding and fused representation)
-        combined = torch.cat([hw_emb.squeeze(1), fused.squeeze(1)], dim=-1)
-        total_latency = self.total_head(combined)  # [B, 1]
-
-        return total_latency, layer_latencies, attn_weights
+        hw_emb = self.hw_encoder(hw_features).unsqueeze(1)
+        arch_emb = self.arch_encoder(op_indices, width_indices)
+        total_latency, layer_latencies, attn_weights, latency_std = self._predict_from_embeddings(hw_emb, arch_emb)
+        if latency_std is None:
+            latency_std = torch.zeros_like(total_latency)
+        return total_latency, latency_std, layer_latencies, attn_weights
 
     def forward_continuous(self, hw_features: torch.Tensor,
                            op_weights: torch.Tensor,
@@ -356,14 +384,24 @@ class CrossHardwareLatencyPredictor(nn.Module):
         """
         hw_emb = self.hw_encoder(hw_features).unsqueeze(1)
         arch_emb = self.arch_encoder.forward_continuous(op_weights, width_weights)
-
-        fused, attn_weights = self.cross_attn(hw_emb, arch_emb, arch_emb)
-
-        layer_latencies = self.layer_head(arch_emb).squeeze(-1)
-        combined = torch.cat([hw_emb.squeeze(1), fused.squeeze(1)], dim=-1)
-        total_latency = self.total_head(combined)
-
+        total_latency, layer_latencies, attn_weights, _ = self._predict_from_embeddings(hw_emb, arch_emb)
         return total_latency, layer_latencies, attn_weights
+
+    def forward_continuous_with_uncertainty(
+        self,
+        hw_features: torch.Tensor,
+        op_weights: torch.Tensor,
+        width_weights: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Continuous forward with mean and std prediction.
+        """
+        hw_emb = self.hw_encoder(hw_features).unsqueeze(1)
+        arch_emb = self.arch_encoder.forward_continuous(op_weights, width_weights)
+        total_latency, layer_latencies, attn_weights, latency_std = self._predict_from_embeddings(hw_emb, arch_emb)
+        if latency_std is None:
+            latency_std = torch.zeros_like(total_latency)
+        return total_latency, latency_std, layer_latencies, attn_weights
 
     def few_shot_adapt(self, support_set: List[Tuple], lr: float = 1e-3,
                        steps: int = 100, freeze_encoders: bool = True):
@@ -386,7 +424,8 @@ class CrossHardwareLatencyPredictor(nn.Module):
             optimizer = torch.optim.Adam(
                 list(self.layer_head.parameters()) +
                 list(self.total_head.parameters()) +
-                list(self.cross_attn.parameters()),
+                list(self.cross_attn.parameters()) +
+                (list(self.uncertainty_head.parameters()) if self.uncertainty_head is not None else []),
                 lr=lr
             )
         else:
@@ -455,6 +494,36 @@ class CrossHardwareLatencyPredictor(nn.Module):
             total_lat = total_lat.squeeze(0)
 
         return total_lat
+
+    def predict_for_hardware_with_uncertainty(
+        self,
+        hw_name: str,
+        op_indices: torch.Tensor,
+        width_indices: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Convenience method to predict latency mean/std by hardware name.
+        """
+        hw_features = get_hardware_features(hw_name)
+        device = next(self.parameters()).device
+        hw_features = hw_features.to(device)
+
+        squeeze = False
+        if op_indices.dim() == 1:
+            op_indices = op_indices.unsqueeze(0)
+            width_indices = width_indices.unsqueeze(0)
+            hw_features = hw_features.unsqueeze(0)
+            squeeze = True
+        else:
+            hw_features = hw_features.unsqueeze(0).expand(op_indices.size(0), -1)
+
+        mean_lat, std_lat, _, _ = self.forward_with_uncertainty(hw_features, op_indices, width_indices)
+
+        if squeeze:
+            mean_lat = mean_lat.squeeze(0)
+            std_lat = std_lat.squeeze(0)
+
+        return mean_lat, std_lat
 
 
 class LatencyPredictorTrainer:
@@ -546,9 +615,15 @@ class LatencyPredictorTrainer:
                 widths = torch.stack([d[2] for d in batch]).to(device)
                 targets = torch.tensor([[d[3]] for d in batch], device=device)
 
-                pred_total, pred_layers, _ = self.predictor(hw_feats, ops, widths)
-
-                loss = F.mse_loss(pred_total, targets)
+                if getattr(self.predictor, 'uncertainty_head', None) is not None:
+                    pred_total, pred_std, _, _ = self.predictor.forward_with_uncertainty(hw_feats, ops, widths)
+                    # Gaussian NLL with predicted variance.
+                    variance = torch.clamp(pred_std ** 2, min=1e-6)
+                    sq_error = (pred_total - targets) ** 2
+                    loss = 0.5 * (sq_error / variance + torch.log(variance)).mean()
+                else:
+                    pred_total, pred_layers, _ = self.predictor(hw_feats, ops, widths)
+                    loss = F.mse_loss(pred_total, targets)
 
                 optimizer.zero_grad()
                 loss.backward()

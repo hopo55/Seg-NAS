@@ -4,6 +4,8 @@ import wandb
 
 # Suppress PyTorch internal deprecation warnings
 warnings.filterwarnings("ignore", message=".*_all_gather_base.*")
+# PS/CALOFA: find_unused_parameters=True triggers false positives during warmup/early phases
+warnings.filterwarnings("ignore", message=".*find_unused_parameters=True was specified.*")
 
 from datetime import datetime
 from utils.argument import get_args
@@ -47,10 +49,11 @@ def main():
         target_val = getattr(args, 'target_flops', None) or 'min'
         lambda_val = args.flops_lambda
 
-    args.log_dir = f"./hyundai/logs/{args.mode}_{data_name}_seed{args.seed}_{opt_mode}{target_val}_lambda{lambda_val}_{search_space}/{timestamp}/"
+    encoder_name = getattr(args, 'encoder_name', 'densenet121')
+    args.log_dir = f"./hyundai/logs/{args.mode}_{data_name}_seed{args.seed}_{opt_mode}{target_val}_lambda{lambda_val}_{search_space}_{encoder_name}/{timestamp}/"
 
     # Include optimization mode in run name
-    run_name = f"hyundai_seed{args.seed}_{opt_mode}_λ{lambda_val}_{search_space}"
+    run_name = f"hyundai_seed{args.seed}_{opt_mode}_λ{lambda_val}_{search_space}_{encoder_name}"
 
     # Initialize wandb only on rank 0
     if not hasattr(args, 'rank') or args.rank == 0:

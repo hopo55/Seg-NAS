@@ -86,8 +86,10 @@ def search_architecture(args, dataset):
 
     # Create SuperNet with specified search space
     search_space = getattr(args, 'search_space', 'basic')
-    model = SuperNet(n_class=2, search_space=search_space)
+    encoder_name = getattr(args, 'encoder_name', 'densenet121')
+    model = SuperNet(n_class=2, search_space=search_space, encoder_name=encoder_name)
     op_names, width_mults = _describe_search_space(search_space)
+    print(f"Encoder: {encoder_name}")
     print(f"Search space: {search_space}")
     print(f"  - {len(op_names)} operations: {', '.join(op_names)}")
     if search_space in ('extended', 'industry'):
@@ -165,8 +167,10 @@ def search_architecture_linas(args, dataset):
     search_space = getattr(args, 'search_space', 'industry')
     if search_space == 'basic':
         raise ValueError("LINAS requires width-aware search space ('extended' or 'industry').")
-    model = SuperNet(n_class=2, search_space=search_space)
+    encoder_name = getattr(args, 'encoder_name', 'densenet121')
+    model = SuperNet(n_class=2, search_space=search_space, encoder_name=encoder_name)
     op_names, width_mults = _describe_search_space(search_space)
+    print(f"Encoder: {encoder_name}")
     print(f"LINAS Search Space: {search_space}")
     print(f"  - {len(op_names)} operations: {', '.join(op_names)}")
     print(f"  - {len(width_mults)} width multipliers: {list(width_mults)}")
@@ -226,11 +230,19 @@ def search_architecture_linas(args, dataset):
     if predictor_path and Path(predictor_path).exists():
         print(f"Loading latency predictor from: {predictor_path}")
         from latency import CrossHardwareLatencyPredictor
+        use_uncertainty = float(getattr(args, 'latency_uncertainty_beta', 0.0)) > 0.0
         latency_predictor = CrossHardwareLatencyPredictor(
             num_ops=len(op_names),
-            num_widths=len(width_mults)
+            num_widths=len(width_mults),
+            predict_uncertainty=use_uncertainty,
         )
-        latency_predictor.load_state_dict(torch.load(predictor_path, map_location=device))
+        state_dict = torch.load(predictor_path, map_location=device)
+        load_result = latency_predictor.load_state_dict(
+            state_dict,
+            strict=not use_uncertainty
+        )
+        if use_uncertainty and getattr(load_result, 'missing_keys', None):
+            print(f"Warning: predictor checkpoint missing keys for uncertainty head: {load_result.missing_keys}")
         latency_predictor = latency_predictor.to(device)
         latency_predictor.eval()
 
@@ -310,8 +322,10 @@ def search_architecture_linas_ps(args, dataset):
     search_space = getattr(args, 'search_space', 'industry')
     if search_space == 'basic':
         raise ValueError("LINAS+PS requires width-aware search space ('extended' or 'industry').")
-    model = SuperNet(n_class=2, search_space=search_space)
+    encoder_name = getattr(args, 'encoder_name', 'densenet121')
+    model = SuperNet(n_class=2, search_space=search_space, encoder_name=encoder_name)
     op_names, width_mults = _describe_search_space(search_space)
+    print(f"Encoder: {encoder_name}")
     print(f"LINAS+PS Search Space: {search_space}")
     print(f"  - {len(op_names)} operations: {', '.join(op_names)}")
     print(f"  - {len(width_mults)} width multipliers: {list(width_mults)}")
@@ -320,12 +334,14 @@ def search_architecture_linas_ps(args, dataset):
     model = model.to(device)
 
     if hasattr(args, 'distributed') and args.distributed:
+        # PS/CALOFA intentionally activates only a subset of widths per step,
+        # so unused parameters are expected.
         model = torch.nn.parallel.DistributedDataParallel(
             model, device_ids=[args.local_rank], output_device=args.local_rank,
-            find_unused_parameters=False
+            find_unused_parameters=True
         )
         if args.rank == 0:
-            print(f"Using DDP with {args.world_size} GPUs")
+            print(f"Using DDP with {args.world_size} GPUs (find_unused_parameters=True for PS)")
     elif torch.cuda.is_available() and len(args.gpu_idx) >= 2:
         model = torch.nn.DataParallel(model, device_ids=args.gpu_idx)
         print(f"Using DataParallel with GPUs: {args.gpu_idx}")
@@ -362,10 +378,18 @@ def search_architecture_linas_ps(args, dataset):
     if predictor_path and Path(predictor_path).exists():
         print(f"Loading latency predictor from: {predictor_path}")
         from latency import CrossHardwareLatencyPredictor
+        use_uncertainty = float(getattr(args, 'latency_uncertainty_beta', 0.0)) > 0.0
         latency_predictor = CrossHardwareLatencyPredictor(
-            num_ops=len(op_names), num_widths=len(width_mults)
+            num_ops=len(op_names), num_widths=len(width_mults),
+            predict_uncertainty=use_uncertainty
         )
-        latency_predictor.load_state_dict(torch.load(predictor_path, map_location=device))
+        state_dict = torch.load(predictor_path, map_location=device)
+        load_result = latency_predictor.load_state_dict(
+            state_dict,
+            strict=not use_uncertainty
+        )
+        if use_uncertainty and getattr(load_result, 'missing_keys', None):
+            print(f"Warning: predictor checkpoint missing keys for uncertainty head: {load_result.missing_keys}")
         latency_predictor = latency_predictor.to(device)
         latency_predictor.eval()
         hardware_targets = getattr(args, 'hardware_targets_dict', None)
@@ -586,37 +610,37 @@ def discover_pareto_architectures(args, model, dataset):
         pin_memory=True
     )
 
+    # Optional latency predictor (used for uncertainty-aware metrics/correlation in CALOFA)
+    latency_predictor = None
+    predictor_path = getattr(args, 'predictor_path', None)
+    if predictor_path and Path(predictor_path).exists():
+        try:
+            from latency import CrossHardwareLatencyPredictor
+            module = model.module if hasattr(model, 'module') else model
+            layer0 = getattr(module, 'deconv1', None)
+            num_ops = len(getattr(layer0, 'op_names', STANDARD_OP_NAMES))
+            num_widths = len(getattr(layer0, 'width_mults', WIDTH_MULTS))
+            use_uncertainty = float(getattr(args, 'latency_uncertainty_beta', 0.0)) > 0.0
+            latency_predictor = CrossHardwareLatencyPredictor(
+                num_ops=num_ops,
+                num_widths=num_widths,
+                predict_uncertainty=use_uncertainty,
+            )
+            state_dict = torch.load(predictor_path, map_location=device)
+            latency_predictor.load_state_dict(state_dict, strict=not use_uncertainty)
+            latency_predictor = latency_predictor.to(device)
+            latency_predictor.eval()
+        except Exception as e:
+            print(f"Warning: Could not load latency predictor for CALOFA metrics: {e}")
+            latency_predictor = None
+
     # Create Pareto searcher
-    searcher = ParetoSearcher(model, luts)
+    searcher = ParetoSearcher(model, luts, latency_predictor=latency_predictor)
 
     # Discover Pareto curve
     num_samples = getattr(args, 'pareto_samples', 1000)
     eval_subset = getattr(args, 'pareto_eval_subset', 100)
-
-    print("\n" + "=" * 70)
-    print("PARETO-BASED ARCHITECTURE DISCOVERY (RF-DETR Style)")
-    print("=" * 70)
-    print(f"  Sampling: {num_samples} architectures")
-    print(f"  Evaluating: {eval_subset} architectures (weight-sharing)")
-    print(f"  Hardware: {list(luts.keys())}")
-    print("=" * 70 + "\n")
-
-    pareto_front = searcher.discover_pareto_curve(
-        val_loader, device,
-        num_samples=num_samples,
-        eval_subset=eval_subset,
-        strategy='mixed'
-    )
-
-    # Print summary
-    print_pareto_summary(pareto_front)
-
-    # Save results
-    save_dir = Path(args.save_dir)
-    save_dir.mkdir(parents=True, exist_ok=True)
-    searcher.save_results(str(save_dir / 'pareto_results.json'))
-
-    # Select best architectures for each hardware's target latency
+    search_backend = getattr(args, 'search_backend', 'ws_pareto')
     hardware_targets = getattr(args, 'hardware_targets_dict', {
         'A6000': 50,
         'RTX3090': 60,
@@ -625,20 +649,86 @@ def discover_pareto_architectures(args, model, dataset):
     })
 
     print("\n" + "=" * 70)
+    print("PARETO-BASED ARCHITECTURE DISCOVERY (RF-DETR Style)")
+    print("=" * 70)
+    print(f"  Backend: {search_backend}")
+    print(f"  Sampling: {num_samples} architectures")
+    print(f"  Evaluating: {eval_subset} architectures (weight-sharing)")
+    print(f"  Hardware: {list(luts.keys())}")
+    print("=" * 70 + "\n")
+
+    if search_backend == 'calofa':
+        pareto_front = searcher.discover_pareto_curve_calofa(
+            val_loader=val_loader,
+            device=device,
+            num_samples=num_samples,
+            eval_subset=eval_subset,
+            hardware_targets=hardware_targets,
+            population_size=max(4, int(getattr(args, 'evo_population', 64))),
+            generations=max(1, int(getattr(args, 'evo_generations', 8))),
+            mutation_prob=float(getattr(args, 'evo_mutation_prob', 0.1)),
+            crossover_prob=float(getattr(args, 'evo_crossover_prob', 0.5)),
+            constraint_margin=float(getattr(args, 'constraint_margin', 0.0)),
+        )
+    else:
+        pareto_front = searcher.discover_pareto_curve(
+            val_loader, device,
+            num_samples=num_samples,
+            eval_subset=eval_subset,
+            strategy='mixed'
+        )
+
+    # Print summary
+    print_pareto_summary(pareto_front)
+
+    # Save results
+    save_dir = Path(args.save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    searcher.save_results(str(save_dir / 'pareto_results.json'))
+    if getattr(args, 'report_hv_igd', False):
+        metrics = searcher.compute_quality_metrics(
+            hardware_targets=hardware_targets,
+            constraint_margin=float(getattr(args, 'constraint_margin', 0.0))
+        )
+        with open(save_dir / 'pareto_metrics.json', 'w') as f:
+            json.dump(metrics, f, indent=2)
+        print("\nPareto quality metrics saved to pareto_metrics.json")
+        for k, v in metrics.items():
+            if isinstance(v, (int, float)):
+                print(f"  {k}: {v:.6f}")
+    if getattr(searcher, 'feasible_front', None):
+        feasible_dict = {
+            hw: [a.to_dict() for a in archs]
+            for hw, archs in searcher.feasible_front.items()
+        }
+        with open(save_dir / 'feasible_pareto.json', 'w') as f:
+            json.dump(feasible_dict, f, indent=2)
+    # Save again so that feasible fronts/metrics are included in pareto_results.json.
+    searcher.save_results(str(save_dir / 'pareto_results.json'))
+
+    # Select best architectures for each hardware's target latency
+
+    print("\n" + "=" * 70)
     print("SELECTED ARCHITECTURES FOR TARGET LATENCIES")
     print("=" * 70)
 
     refine_topk = max(1, int(getattr(args, 'pareto_refine_topk', 1)))
+    constraint_margin = float(getattr(args, 'constraint_margin', 0.0))
     if refine_topk > 1:
         print(f"Refinement: evaluating top-{refine_topk} Pareto candidates as extracted subnets")
 
     selected_archs = {}
     for hw, target_lat in hardware_targets.items():
         if hw in luts:
-            pareto_candidates = list(searcher.pareto_front.get(hw, []))
+            if search_backend == 'calofa' and getattr(searcher, 'feasible_front', None):
+                pareto_candidates = list(searcher.feasible_front.get(hw, []))
+                if not pareto_candidates:
+                    pareto_candidates = list(searcher.pareto_front.get(hw, []))
+            else:
+                pareto_candidates = list(searcher.pareto_front.get(hw, []))
             valid_candidates = [
                 cand for cand in pareto_candidates
-                if cand.latencies.get(hw, float('inf')) <= target_lat
+                if cand.latencies.get(hw, float('inf')) <= (target_lat + constraint_margin)
             ]
             if not valid_candidates:
                 valid_candidates = pareto_candidates[:1]
@@ -689,7 +779,14 @@ def search_and_discover_pareto(args, dataset):
     print("=" * 70 + "\n")
 
     # Phase 1: Train supernet
-    model = search_architecture_linas(args, dataset)
+    search_backend = getattr(args, 'search_backend', 'ws_pareto')
+    use_ps = getattr(args, 'use_progressive_shrinking', False) or search_backend == 'calofa'
+    if use_ps:
+        if search_backend == 'calofa':
+            print("CALOFA backend selected: enabling Progressive Shrinking by default.")
+        model = search_architecture_linas_ps(args, dataset)
+    else:
+        model = search_architecture_linas(args, dataset)
 
     print("\n" + "=" * 70)
     print("PHASE 2: PARETO DISCOVERY")

@@ -18,7 +18,8 @@
 # =============================================================================
 
 # Environment
-SEEDS=(0 1 2 42 123)
+# SEEDS=(0 1 2 42 123)
+SEEDS=(0)
 DATA='all'
 
 # GPU Configuration for DDP
@@ -52,6 +53,10 @@ CLIP=5.0
 W_EPOCHS=1
 EPOCHS=2
 
+# Encoder backbone
+#   - densenet121, resnet50, efficientnet_b0, mobilenet_v3_large
+ENCODER='densenet121'
+
 # Search Space
 #   - extended: standard 5 ops x 3 widths
 #   - industry: standard + industry-specific ops x 3 widths
@@ -74,14 +79,30 @@ HARDWARE_TARGETS[Odroid]=160       # Edge CPU (ARM, 25GB/s BW, 4GB) - slowest
 
 # Progressive Shrinking (OFA-style) Settings
 USE_PS=true                # Set to true to enable progressive shrinking
-PS_PHASE_EPOCHS="20 15 15"  # Epochs per phase: [width=1.0] [0.75,1.0] [0.5,0.75,1.0]
+# PS_PHASE_EPOCHS="20 15 15"  # Epochs per phase: [width=1.0] [0.75,1.0] [0.5,0.75,1.0]
+PS_PHASE_EPOCHS="1 1 1"  # Epochs per phase: [width=1.0] [0.75,1.0] [0.5,0.75,1.0]
 PS_KD_ALPHA=0.5             # Knowledge distillation loss weight
 PS_KD_TEMPERATURE=4.0       # Knowledge distillation temperature
 
+# CALOFA settings
+#   - ws_pareto: legacy sampling + weight-sharing evaluation
+#   - calofa: OFA sandwich + constraint-aware evolutionary Pareto
+SEARCH_BACKEND='calofa'
+OFA_SANDWICH_K=2
+LATENCY_UNCERTAINTY_BETA=0.0
+CONSTRAINT_MARGIN=0.0
+EVO_POPULATION=64
+EVO_GENERATIONS=8
+EVO_MUTATION_PROB=0.1
+EVO_CROSSOVER_PROB=0.5
+REPORT_HV_IGD=true
+
 # Pareto search settings
 PARETO_SAMPLES=1000     # Number of architectures to sample
-PARETO_EVAL_SUBSET=100  # Number to actually evaluate
-PARETO_REFINE_TOPK=5    # Re-evaluate top-k as extracted subnet before final pick
+# PARETO_EVAL_SUBSET=100  # Number to actually evaluate
+# PARETO_REFINE_TOPK=5    # Re-evaluate top-k as extracted subnet before final pick
+PARETO_EVAL_SUBSET=5  # Number to actually evaluate
+PARETO_REFINE_TOPK=1    # Re-evaluate top-k as extracted subnet before final pick
 
 # LUT directory
 LUT_DIR='./hyundai/latency/luts'
@@ -132,6 +153,14 @@ build_ps_flags() {
     fi
 }
 
+build_calofa_flags() {
+    local flags="--search_backend $SEARCH_BACKEND --ofa_sandwich_k $OFA_SANDWICH_K --latency_uncertainty_beta $LATENCY_UNCERTAINTY_BETA --constraint_margin $CONSTRAINT_MARGIN --evo_population $EVO_POPULATION --evo_generations $EVO_GENERATIONS --evo_mutation_prob $EVO_MUTATION_PROB --evo_crossover_prob $EVO_CROSSOVER_PROB"
+    if [ "$REPORT_HV_IGD" = "true" ]; then
+        flags="$flags --report_hv_igd"
+    fi
+    echo "$flags"
+}
+
 build_hardware_targets_json() {
     local json="{"
     local first=true
@@ -151,10 +180,13 @@ run_pareto() {
     local SEED=$1
     local HW_TARGETS=$(build_hardware_targets_json)
     local PS_FLAGS=$(build_ps_flags)
+    local CALOFA_FLAGS=$(build_calofa_flags)
 
     echo "========================================"
     echo "PARETO-BASED NAS (RF-DETR Style)"
     echo "  Seed: $SEED"
+    echo "  Encoder: $ENCODER"
+    echo "  Search Backend: $SEARCH_BACKEND"
     echo "  Samples: $PARETO_SAMPLES"
     echo "  Eval Subset: $PARETO_EVAL_SUBSET"
     echo "  Hardware Targets: $HW_TARGETS"
@@ -207,6 +239,7 @@ run_pareto() {
         --clip_grad $CLIP \
         --opt_lr $OPT_LR \
         --search_space $SEARCH_SPACE \
+        --encoder_name $ENCODER \
         --latency_lambda $LATENCY_LAMBDA \
         --use_latency \
         --lut_dir $LUT_DIR \
@@ -216,6 +249,7 @@ run_pareto() {
         --pareto_eval_subset $PARETO_EVAL_SUBSET \
         --pareto_refine_topk $PARETO_REFINE_TOPK \
         --primary_hardware $PRIMARY_HARDWARE \
+        $CALOFA_FLAGS \
         $PS_FLAGS
 }
 
@@ -225,11 +259,14 @@ run_single() {
     local TARGET_LAT=${HARDWARE_TARGETS[$HARDWARE]}
     local LUT_PATH="${LUT_DIR}/lut_${HARDWARE,,}.json"
     local PS_FLAGS=$(build_ps_flags)
+    local CALOFA_FLAGS=$(build_calofa_flags)
 
     echo "========================================"
     echo "SINGLE-HARDWARE NAS"
     echo "  Seed: $SEED"
     echo "  Hardware: $HARDWARE"
+    echo "  Encoder: $ENCODER"
+    echo "  Search Backend: $SEARCH_BACKEND"
     echo "  Target Latency: ${TARGET_LAT}ms"
     echo "  LUT: $LUT_PATH"
     echo "  Progressive Shrinking: $USE_PS"
@@ -270,11 +307,13 @@ run_single() {
         --clip_grad $CLIP \
         --opt_lr $OPT_LR \
         --search_space $SEARCH_SPACE \
+        --encoder_name $ENCODER \
         --latency_lambda $LATENCY_LAMBDA \
         --target_latency $TARGET_LAT \
         --primary_hardware $HARDWARE \
         --use_latency \
         --lut_path $LUT_PATH \
+        $CALOFA_FLAGS \
         $PS_FLAGS
 }
 
@@ -286,7 +325,9 @@ echo "=============================================="
 echo "LINAS: Latency-aware Industrial NAS"
 echo "=============================================="
 echo "Mode: $MODE_ARG"
+echo "Encoder: $ENCODER"
 echo "Search Space: $SEARCH_SPACE"
+echo "Search Backend: $SEARCH_BACKEND"
 echo "Seeds: ${SEEDS[*]}"
 echo "=============================================="
 

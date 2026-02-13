@@ -2,6 +2,7 @@ import os
 import time
 import torch
 import torch.nn.functional as F
+from contextlib import nullcontext
 from tqdm import tqdm
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -89,6 +90,144 @@ def _is_main_process(args) -> bool:
 
 def _sync_meter(meter: AverageMeter):
     meter.synchronize_between_processes()
+
+
+def _get_model_module(model):
+    if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
+        return model.module
+    return model
+
+
+def _predict_safe_latency_continuous(
+    args,
+    latency_predictor,
+    hw_features: torch.Tensor,
+    op_weights: torch.Tensor,
+    width_weights: torch.Tensor,
+):
+    beta = float(getattr(args, 'latency_uncertainty_beta', 0.0))
+    if beta > 0 and hasattr(latency_predictor, 'forward_continuous_with_uncertainty'):
+        mean_lat, std_lat, _, _ = latency_predictor.forward_continuous_with_uncertainty(
+            hw_features, op_weights, width_weights
+        )
+        safe_lat = mean_lat + beta * std_lat
+        return safe_lat, mean_lat, std_lat
+
+    mean_lat, _, _ = latency_predictor.forward_continuous(hw_features, op_weights, width_weights)
+    zero_std = torch.zeros_like(mean_lat)
+    return mean_lat, mean_lat, zero_std
+
+
+def _predict_safe_latency_discrete(
+    args,
+    latency_predictor,
+    hw_features: torch.Tensor,
+    op_indices: torch.Tensor,
+    width_indices: torch.Tensor,
+):
+    beta = float(getattr(args, 'latency_uncertainty_beta', 0.0))
+    if beta > 0 and hasattr(latency_predictor, 'forward_with_uncertainty'):
+        mean_lat, std_lat, _, _ = latency_predictor.forward_with_uncertainty(
+            hw_features, op_indices, width_indices
+        )
+        safe_lat = mean_lat + beta * std_lat
+        return safe_lat, mean_lat, std_lat
+
+    mean_lat, _, _ = latency_predictor(hw_features, op_indices, width_indices)
+    zero_std = torch.zeros_like(mean_lat)
+    return mean_lat, mean_lat, zero_std
+
+
+@torch.no_grad()
+def _estimate_constraint_violation(
+    args,
+    model,
+    latency_predictor=None,
+    latency_lut=None,
+    hardware_targets: Optional[Dict[str, float]] = None,
+):
+    """
+    Estimate current architecture constraint violation from argmax architecture.
+
+    Returns:
+        dict with keys:
+          - avg_violation_ratio
+          - avg_violation_ms
+          - primary_safe_latency
+    """
+    module = _get_model_module(model)
+    margin = float(getattr(args, 'constraint_margin', 0.0))
+
+    if latency_predictor is not None and hardware_targets is not None and len(hardware_targets) > 0:
+        from latency import get_hardware_features
+
+        op_indices, width_indices = module.get_arch_indices()
+        op_indices = op_indices.unsqueeze(0).to(next(module.parameters()).device)
+        width_indices = width_indices.unsqueeze(0).to(next(module.parameters()).device)
+
+        violations_ratio = []
+        violations_ms = []
+        primary_safe = None
+        for idx, (hw_name, target_lat) in enumerate(hardware_targets.items()):
+            hw_features = get_hardware_features(hw_name).to(op_indices.device).unsqueeze(0)
+            safe_lat, mean_lat, _ = _predict_safe_latency_discrete(
+                args, latency_predictor, hw_features, op_indices, width_indices
+            )
+            safe_val = float(safe_lat.squeeze().item())
+            violation_ms = max(0.0, safe_val - float(target_lat) - margin)
+            violation_ratio = violation_ms / max(float(target_lat), 1e-6)
+            violations_ms.append(violation_ms)
+            violations_ratio.append(violation_ratio)
+            if idx == 0:
+                primary_safe = safe_val
+
+        return {
+            'avg_violation_ratio': float(sum(violations_ratio) / len(violations_ratio)),
+            'avg_violation_ms': float(sum(violations_ms) / len(violations_ms)),
+            'primary_safe_latency': float(primary_safe if primary_safe is not None else 0.0),
+        }
+
+    if latency_lut is not None:
+        current_lat = float(module.get_argmax_latency(latency_lut))
+        target_lat = getattr(args, 'target_latency', None)
+        if target_lat is None or target_lat <= 0:
+            return {
+                'avg_violation_ratio': 0.0,
+                'avg_violation_ms': 0.0,
+                'primary_safe_latency': current_lat,
+            }
+        violation_ms = max(0.0, current_lat - float(target_lat) - margin)
+        violation_ratio = violation_ms / max(float(target_lat), 1e-6)
+        return {
+            'avg_violation_ratio': float(violation_ratio),
+            'avg_violation_ms': float(violation_ms),
+            'primary_safe_latency': current_lat,
+        }
+
+    return {
+        'avg_violation_ratio': 0.0,
+        'avg_violation_ms': 0.0,
+        'primary_safe_latency': 0.0,
+    }
+
+
+def _build_sandwich_width_indices(active_indices: List[int], k_random: int) -> List[int]:
+    """Build width schedule: largest + smallest + random-k (unique)."""
+    if not active_indices:
+        return []
+    ordered = sorted(set(int(i) for i in active_indices))
+    largest = ordered[-1]
+    smallest = ordered[0]
+    schedule = [largest]
+    if smallest != largest:
+        schedule.append(smallest)
+
+    candidates = [i for i in ordered if i not in {largest, smallest}]
+    if candidates and k_random > 0:
+        k = min(int(k_random), len(candidates))
+        rand_idx = torch.randperm(len(candidates))[:k].tolist()
+        schedule.extend(candidates[i] for i in rand_idx)
+    return schedule
 
 
 # train warmup
@@ -318,17 +457,22 @@ def train_weight_alpha_with_latency(
             op_weights, width_weights = module.get_alpha_weights()
             op_weights = op_weights.unsqueeze(0)  # [1, 5, num_ops]
             width_weights = width_weights.unsqueeze(0)  # [1, 5, num_widths]
+            constraint_margin = float(getattr(args, 'constraint_margin', 0.0))
 
             for hw_name, target_lat in hardware_targets.items():
                 hw_features = get_hardware_features(hw_name).to(data.device)
                 hw_features = hw_features.unsqueeze(0)
 
-                pred_lat, _, _ = latency_predictor.forward_continuous(
-                    hw_features, op_weights, width_weights
+                safe_lat, _, _ = _predict_safe_latency_continuous(
+                    args,
+                    latency_predictor,
+                    hw_features,
+                    op_weights,
+                    width_weights,
                 )
 
                 # Soft constraint: penalty only if over target
-                lat_loss = F.relu(pred_lat - target_lat)
+                lat_loss = F.relu(safe_lat - target_lat - constraint_margin)
                 latency_penalty = latency_penalty + args.latency_lambda * lat_loss.squeeze()
 
             # Log the primary target hardware latency
@@ -336,23 +480,26 @@ def train_weight_alpha_with_latency(
             hw_features = get_hardware_features(primary_hw).to(data.device).unsqueeze(0)
             with torch.no_grad():
                 op_indices, width_indices = module.get_arch_indices()
-                pred_lat, _, _ = latency_predictor(
+                safe_lat, _, _ = _predict_safe_latency_discrete(
+                    args,
+                    latency_predictor,
                     hw_features,
                     op_indices.unsqueeze(0).to(data.device),
-                    width_indices.unsqueeze(0).to(data.device)
+                    width_indices.unsqueeze(0).to(data.device),
                 )
-                current_latency = pred_lat.item()
+                current_latency = safe_lat.item()
 
         elif latency_lut is not None:
             # Single hardware LUT-based latency
             target_latency = getattr(args, "target_latency", None)
+            constraint_margin = float(getattr(args, 'constraint_margin', 0.0))
 
             sampled_latency = module.get_sampled_latency(latency_lut, temperature=current_temp)
             current_latency = module.get_argmax_latency(latency_lut)
 
             if target_latency is not None and target_latency > 0:
                 # Constraint-based: penalize only target violation
-                latency_penalty = args.latency_lambda * F.relu(sampled_latency - target_latency)
+                latency_penalty = args.latency_lambda * F.relu(sampled_latency - target_latency - constraint_margin)
             else:
                 # Minimize latency
                 latency_penalty = args.latency_lambda * sampled_latency
@@ -491,6 +638,7 @@ def train_architecture_with_latency(
     )
 
     best_val_iou = -float('inf')
+    best_constrained_score = -float('inf')
 
     # Track GPU hours
     warmup_start_time = time.time()
@@ -543,8 +691,20 @@ def train_architecture_with_latency(
         )
 
         val_iou = test_architecture(model, val_loader, desc="Search Val")
+        constraint_stats = _estimate_constraint_violation(
+            args,
+            model,
+            latency_predictor=latency_predictor,
+            latency_lut=latency_lut,
+            hardware_targets=hardware_targets,
+        )
+        violation_ratio = constraint_stats['avg_violation_ratio']
+        violation_ms = constraint_stats['avg_violation_ms']
+        safe_primary_latency = constraint_stats['primary_safe_latency']
+        constrained_score = val_iou - violation_ratio
 
-        if val_iou > best_val_iou:
+        if constrained_score > best_constrained_score:
+            best_constrained_score = constrained_score
             best_val_iou = val_iou
 
             # Only rank 0 saves checkpoints
@@ -565,7 +725,9 @@ def train_architecture_with_latency(
             f"[Train W] Loss: {train_w_loss:.4f}, mIoU: {train_w_iou:.4f}\n"
             f"[Train A] Loss: {train_a_loss:.4f}, mIoU: {train_a_iou:.4f}, "
             f"Latency: {train_latency:.2f}ms\n"
-            f"[Val] mIoU: {val_iou:.4f}"
+            f"[Val] mIoU: {val_iou:.4f}, Safe Latency: {safe_primary_latency:.2f}ms, "
+            f"Violation: {violation_ms:.4f}ms ({violation_ratio:.4f}), "
+            f"Constrained Score: {constrained_score:.4f}"
         )
 
     # Log search time
@@ -885,27 +1047,79 @@ def train_weight_alpha_with_latency_ps(
                                                  torch.nn.parallel.DistributedDataParallel)) else model
 
     # Phase 1: Train weights with optional KD
+    use_calofa = getattr(args, 'search_backend', 'ws_pareto') == 'calofa'
+    sandwich_k = max(0, int(getattr(args, 'ofa_sandwich_k', 0)))
     train_loader_iter = tqdm(train_loader, desc="Train Weight (PS)", total=len(train_loader))
     for data, labels in train_loader_iter:
         device = next(model.parameters()).device
         data, labels = data.to(device, non_blocking=True), labels.to(device, non_blocking=True)
         batch_size = data.size(0)
         optimizer_weight.zero_grad()
-        outputs = model(data, temperature=current_temp, hard=hard_mode)
-        task_loss = loss(outputs, labels)
 
-        total_weight_loss = task_loss
-        if use_kd:
-            teacher_output = module.forward_teacher(data)
-            kd_loss = F.kl_div(
-                F.log_softmax(outputs / kd_temp, dim=1),
-                F.softmax(teacher_output / kd_temp, dim=1),
-                reduction='batchmean'
-            ) * (kd_temp ** 2)
-            total_weight_loss = (1 - kd_alpha) * task_loss + kd_alpha * kd_loss
+        # CALOFA: OFA sandwich rule (largest + smallest + random-k) with inplace KD.
+        # Each subnet is backward-ed individually to avoid DDP "marked ready twice" errors.
+        # We use no_sync() for all but the last subnet so gradient all-reduce happens once.
+        if use_calofa and hasattr(module, 'set_active_widths') and hasattr(module, 'get_active_widths'):
+            original_active = module.get_active_widths()
+            sandwich_indices = _build_sandwich_width_indices(original_active, sandwich_k)
+            if not sandwich_indices:
+                sandwich_indices = original_active
 
-        train_w_loss.update(task_loss.item(), batch_size)
-        train_w_iou.update(get_iou_score(outputs, labels), batch_size)
+            teacher_output = None
+            kd_alpha_eff = float(getattr(args, 'ps_kd_alpha', kd_alpha))
+            kd_temp_eff = float(getattr(args, 'ps_kd_temperature', kd_temp))
+            num_subnets = len(sandwich_indices)
+            is_ddp = isinstance(model, torch.nn.parallel.DistributedDataParallel)
+
+            for idx_pos, width_idx in enumerate(sandwich_indices):
+                module.set_active_widths([int(width_idx)])
+                is_last = (idx_pos == num_subnets - 1)
+
+                # Use no_sync for all but the last subnet to defer gradient all-reduce
+                ctx = model.no_sync() if (is_ddp and not is_last) else nullcontext()
+                with ctx:
+                    outputs_sub = model(data, temperature=current_temp, hard=hard_mode)
+                    task_loss_sub = loss(outputs_sub, labels)
+
+                    if idx_pos == 0:
+                        teacher_output = outputs_sub.detach()
+                        subnet_loss = task_loss_sub / num_subnets
+                        train_w_loss.update(task_loss_sub.item(), batch_size)
+                        train_w_iou.update(get_iou_score(outputs_sub, labels), batch_size)
+                    else:
+                        kd_loss = F.kl_div(
+                            F.log_softmax(outputs_sub / kd_temp_eff, dim=1),
+                            F.softmax(teacher_output / kd_temp_eff, dim=1),
+                            reduction='batchmean'
+                        ) * (kd_temp_eff ** 2)
+                        subnet_loss = ((1 - kd_alpha_eff) * task_loss_sub + kd_alpha_eff * kd_loss) / num_subnets
+
+                    subnet_loss.backward()
+
+            module.set_active_widths(original_active)
+            # Gradients already accumulated; skip total_weight_loss.backward() below
+            optimizer_weight.step()
+            train_loader_iter.set_postfix(
+                loss=f"{train_w_loss.avg:.4f}",
+                iou=f"{train_w_iou.avg:.4f}",
+            )
+            continue
+        else:
+            outputs = model(data, temperature=current_temp, hard=hard_mode)
+            task_loss = loss(outputs, labels)
+
+            total_weight_loss = task_loss
+            if use_kd:
+                teacher_output = module.forward_teacher(data)
+                kd_loss = F.kl_div(
+                    F.log_softmax(outputs / kd_temp, dim=1),
+                    F.softmax(teacher_output / kd_temp, dim=1),
+                    reduction='batchmean'
+                ) * (kd_temp ** 2)
+                total_weight_loss = (1 - kd_alpha) * task_loss + kd_alpha * kd_loss
+
+            train_w_loss.update(task_loss.item(), batch_size)
+            train_w_iou.update(get_iou_score(outputs, labels), batch_size)
 
         total_weight_loss.backward()
         optimizer_weight.step()
@@ -933,29 +1147,37 @@ def train_weight_alpha_with_latency_ps(
             op_weights, width_weights = module.get_alpha_weights()
             op_weights = op_weights.unsqueeze(0)
             width_weights = width_weights.unsqueeze(0)
+            constraint_margin = float(getattr(args, 'constraint_margin', 0.0))
             for hw_name, target_lat in hardware_targets.items():
                 hw_features = get_hardware_features(hw_name).to(data.device).unsqueeze(0)
-                pred_lat, _, _ = latency_predictor.forward_continuous(
-                    hw_features, op_weights, width_weights
+                safe_lat, _, _ = _predict_safe_latency_continuous(
+                    args,
+                    latency_predictor,
+                    hw_features,
+                    op_weights,
+                    width_weights,
                 )
-                lat_loss = F.relu(pred_lat - target_lat)
+                lat_loss = F.relu(safe_lat - target_lat - constraint_margin)
                 latency_penalty = latency_penalty + args.latency_lambda * lat_loss.squeeze()
             primary_hw = list(hardware_targets.keys())[0]
             hw_features = get_hardware_features(primary_hw).to(data.device).unsqueeze(0)
             with torch.no_grad():
                 op_indices, width_indices = module.get_arch_indices()
-                pred_lat, _, _ = latency_predictor(
+                safe_lat, _, _ = _predict_safe_latency_discrete(
+                    args,
+                    latency_predictor,
                     hw_features,
                     op_indices.unsqueeze(0).to(data.device),
-                    width_indices.unsqueeze(0).to(data.device)
+                    width_indices.unsqueeze(0).to(data.device),
                 )
-                current_latency_val = pred_lat.item()
+                current_latency_val = safe_lat.item()
         elif latency_lut is not None:
             target_latency = getattr(args, "target_latency", None)
+            constraint_margin = float(getattr(args, 'constraint_margin', 0.0))
             sampled_latency = module.get_sampled_latency(latency_lut, temperature=current_temp)
             current_latency_val = module.get_argmax_latency(latency_lut)
             if target_latency is not None and target_latency > 0:
-                latency_penalty = args.latency_lambda * F.relu(sampled_latency - target_latency)
+                latency_penalty = args.latency_lambda * F.relu(sampled_latency - target_latency - constraint_margin)
             else:
                 latency_penalty = args.latency_lambda * sampled_latency
         else:
@@ -1068,6 +1290,7 @@ def train_architecture_with_latency_ps(
                     phase.kd_temperature = ps_kd_temperature
 
     best_val_iou = -float('inf')
+    best_constrained_score = -float('inf')
     global_epoch = 0
 
     # === WARMUP PHASE (width=1.0 only) ===
@@ -1126,8 +1349,20 @@ def train_architecture_with_latency_ps(
             )
 
             val_iou = test_architecture(model, val_loader, desc=f"{phase.name} Val")
+            constraint_stats = _estimate_constraint_violation(
+                args,
+                model,
+                latency_predictor=latency_predictor,
+                latency_lut=latency_lut,
+                hardware_targets=hardware_targets,
+            )
+            violation_ratio = constraint_stats['avg_violation_ratio']
+            violation_ms = constraint_stats['avg_violation_ms']
+            safe_primary_latency = constraint_stats['primary_safe_latency']
+            constrained_score = val_iou - violation_ratio
 
-            if val_iou > best_val_iou:
+            if constrained_score > best_constrained_score:
+                best_constrained_score = constrained_score
                 best_val_iou = val_iou
                 if _is_main_process(args):
                     save_path = os.path.join(args.save_dir, 'best_architecture.pt')
@@ -1139,7 +1374,9 @@ def train_architecture_with_latency_ps(
                 f"[Train W] Loss: {train_w_loss:.4f}, mIoU: {train_w_iou:.4f}\n"
                 f"[Train A] Loss: {train_a_loss:.4f}, mIoU: {train_a_iou:.4f}, "
                 f"Latency: {train_latency:.2f}ms\n"
-                f"[Val] mIoU: {val_iou:.4f}"
+                f"[Val] mIoU: {val_iou:.4f}, Safe Latency: {safe_primary_latency:.2f}ms, "
+                f"Violation: {violation_ms:.4f}ms ({violation_ratio:.4f}), "
+                f"Constrained Score: {constrained_score:.4f}"
             )
             global_epoch += 1
 

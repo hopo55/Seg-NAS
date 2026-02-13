@@ -80,25 +80,33 @@ class LatencyLUTBuilder:
         lut = builder.build_lut('RTX4090', save_path='lut_rtx4090.json')
     """
 
-    def __init__(self, input_size: int = 128, warmup: int = 200, repeat: int = 300):
+    def __init__(self, input_size: int = 128, warmup: int = 200, repeat: int = 300,
+                 encoder_name: str = 'densenet121'):
         """
         Args:
             input_size: Input image size (assumes square)
             warmup: Number of warmup iterations
             repeat: Number of measurement iterations
+            encoder_name: Encoder backbone name (determines decoder channel sizes)
         """
         self.input_size = input_size
         self.warmup = warmup
         self.repeat = repeat
+        self.encoder_name = encoder_name
 
-        # Layer configurations for decoder
+        # Derive layer configurations from encoder channels
+        from nas.supernet_dense import ENCODER_CONFIGS
+        enc = ENCODER_CONFIGS[encoder_name]['channels']  # [x1, x2, x3, x4, x5]
+        c5, c4, c3, c2, c1 = enc[4], enc[3], enc[2], enc[1], enc[0]
+        c_final = max(c1 // 2, 16)
+
         H = input_size // 32
         self.layer_configs = [
-            {'C_in': 1024, 'C_out': 512, 'H_out': H * 2, 'W_out': H * 2},   # deconv1: 4->8
-            {'C_in': 512, 'C_out': 256, 'H_out': H * 4, 'W_out': H * 4},    # deconv2: 8->16
-            {'C_in': 256, 'C_out': 128, 'H_out': H * 8, 'W_out': H * 8},    # deconv3: 16->32
-            {'C_in': 128, 'C_out': 64, 'H_out': H * 16, 'W_out': H * 16},   # deconv4: 32->64
-            {'C_in': 64, 'C_out': 32, 'H_out': H * 32, 'W_out': H * 32},    # deconv5: 64->128
+            {'C_in': c5, 'C_out': c4, 'H_out': H * 2, 'W_out': H * 2},         # deconv1
+            {'C_in': c4, 'C_out': c3, 'H_out': H * 4, 'W_out': H * 4},         # deconv2
+            {'C_in': c3, 'C_out': c2, 'H_out': H * 8, 'W_out': H * 8},         # deconv3
+            {'C_in': c2, 'C_out': c1, 'H_out': H * 16, 'W_out': H * 16},       # deconv4
+            {'C_in': c1, 'C_out': c_final, 'H_out': H * 32, 'W_out': H * 32},  # deconv5
         ]
 
     def _create_operation(self, op_name: str, C_in: int, C_out: int,
@@ -405,7 +413,16 @@ def merge_luts(lut_paths: List[str], save_path: Optional[str] = None) -> Dict:
 
 
 if __name__ == '__main__':
-    # Example usage
-    builder = LatencyLUTBuilder(input_size=128, warmup=200, repeat=300)
-    luts = builder.build_all_hardware_luts()
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--encoder_name', type=str, default='densenet121',
+                    choices=['densenet121', 'resnet50', 'efficientnet_b0', 'mobilenet_v3_large'])
+    ap.add_argument('--input_size', type=int, default=128)
+    ap.add_argument('--hardware_name', type=str, default=None,
+                    help='Override hardware name (for CPU-only devices)')
+    cli_args = ap.parse_args()
+
+    builder = LatencyLUTBuilder(input_size=cli_args.input_size, warmup=200, repeat=300,
+                                encoder_name=cli_args.encoder_name)
+    luts = builder.build_all_hardware_luts(hardware_name=cli_args.hardware_name)
     print("\nLUT building complete!")

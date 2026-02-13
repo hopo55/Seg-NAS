@@ -66,6 +66,9 @@ def get_args(include_comparison_args=False):
                         help='Search space type: basic (5 ops, 3125 archs), '
                              'extended (5 ops x 3 widths, 759375 archs), '
                              'or industry (7 ops x 3 widths, 4084101 archs)')
+    parser.add_argument('--encoder_name', type=str, default='densenet121',
+                        choices=['densenet121', 'resnet50', 'efficientnet_b0', 'mobilenet_v3_large'],
+                        help='Encoder backbone (default: densenet121)')
     parser.add_argument('--train_val_split', type=float, default=0.8,
                         help='Train ratio within train+val pool after test split '
                              '(e.g., 0.8 => 80%% train, 20%% val)')
@@ -105,6 +108,17 @@ def get_args(include_comparison_args=False):
     parser.add_argument('--ps_kd_temperature', type=float, default=4.0,
                         help='Knowledge distillation temperature (default: 4.0)')
 
+    # CALOFA backend and constraints
+    parser.add_argument('--search_backend', type=str, default='ws_pareto',
+                        choices=['ws_pareto', 'calofa'],
+                        help='Search backend: ws_pareto (legacy) or calofa (OFA+constraints)')
+    parser.add_argument('--ofa_sandwich_k', type=int, default=2,
+                        help='Number of random subnets in OFA sandwich rule (default: 2)')
+    parser.add_argument('--latency_uncertainty_beta', type=float, default=0.0,
+                        help='Safety factor for uncertainty-aware latency: safe = mean + beta*std')
+    parser.add_argument('--constraint_margin', type=float, default=0.0,
+                        help='Allowed latency slack in ms before counting violation')
+
     # Pareto search arguments (RF-DETR style)
     parser.add_argument('--pareto_samples', type=int, default=1000,
                         help='Number of architectures to sample for Pareto discovery (default: 1000)')
@@ -112,6 +126,16 @@ def get_args(include_comparison_args=False):
                         help='Number of architectures to actually evaluate with weight-sharing (default: 100)')
     parser.add_argument('--pareto_refine_topk', type=int, default=5,
                         help='Top-k Pareto candidates to re-evaluate as extracted subnet for final selection (default: 5)')
+    parser.add_argument('--evo_population', type=int, default=64,
+                        help='Population size for CALOFA evolutionary refinement (default: 64)')
+    parser.add_argument('--evo_generations', type=int, default=8,
+                        help='Number of generations for CALOFA evolutionary refinement (default: 8)')
+    parser.add_argument('--evo_mutation_prob', type=float, default=0.1,
+                        help='Mutation probability per gene in CALOFA evolution (default: 0.1)')
+    parser.add_argument('--evo_crossover_prob', type=float, default=0.5,
+                        help='Crossover probability per gene in CALOFA evolution (default: 0.5)')
+    parser.add_argument('--report_hv_igd', action='store_true',
+                        help='Compute and save Pareto HV/IGD quality metrics')
 
     # Comparison arguments (only for comparison entrypoint)
     if include_comparison_args:

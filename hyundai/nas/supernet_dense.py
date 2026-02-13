@@ -1,19 +1,34 @@
 import copy
 import torch
 from torch import nn
+from torchvision import models as tv_models
 from torchvision.models import DenseNet121_Weights, densenet121
 
 from utils.operations import MixedOp, MixedOpWithWidth
 from nas.search_space import STANDARD_OP_NAMES, ALL_OP_NAMES, WIDTH_MULTS
+
+# ---------------------------------------------------------------------------
+# Encoder configurations: channel counts at each spatial resolution
+#   channels = [x1 (H/2), x2 (H/4), x3 (H/8), x4 (H/16), x5 (H/32)]
+# ---------------------------------------------------------------------------
+ENCODER_CONFIGS = {
+    'densenet121':        {'channels': [64,  128, 256, 512,  1024]},
+    'resnet50':           {'channels': [64,  256, 512, 1024, 2048]},
+    'efficientnet_b0':    {'channels': [16,  24,  40,  112,  320]},
+    'mobilenet_v3_large': {'channels': [16,  24,  40,  112,  960]},
+}
 
 ranges = {
     "densenet": ((0, 3), (4, 6), (6, 8), (8, 10), (10, 12)),
 }
 
 
-class DenseNet(nn.Module):
+# ---------------------------------------------------------------------------
+# Encoder wrappers — each returns dict with keys "x1".."x5"
+# ---------------------------------------------------------------------------
+class DenseNetEncoder(nn.Module):
     def __init__(self):
-        super(DenseNet, self).__init__()
+        super().__init__()
         self.ranges = ranges["densenet"]
         self.features = densenet121(weights=DenseNet121_Weights.DEFAULT).features
         self.conv2d = nn.Conv2d(1024, 1024, kernel_size=1, stride=2, padding=0)
@@ -28,167 +43,238 @@ class DenseNet(nn.Module):
         return output
 
 
+class ResNetEncoder(nn.Module):
+    def __init__(self):
+        super().__init__()
+        backbone = tv_models.resnet50(weights=tv_models.ResNet50_Weights.DEFAULT)
+        self.conv1 = backbone.conv1
+        self.bn1 = backbone.bn1
+        self.relu = backbone.relu
+        self.maxpool = backbone.maxpool
+        self.layer1 = backbone.layer1
+        self.layer2 = backbone.layer2
+        self.layer3 = backbone.layer3
+        self.layer4 = backbone.layer4
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x1 = x                       # H/2, 64 ch
+        x = self.maxpool(x)
+        x2 = self.layer1(x)          # H/4, 256 ch
+        x3 = self.layer2(x2)         # H/8, 512 ch
+        x4 = self.layer3(x3)         # H/16, 1024 ch
+        x5 = self.layer4(x4)         # H/32, 2048 ch
+        return {"x1": x1, "x2": x2, "x3": x3, "x4": x4, "x5": x5}
+
+
+class EfficientNetEncoder(nn.Module):
+    """EfficientNet-B0 encoder. Uses features[0..7], skips features[8] (1x1 expansion)."""
+    def __init__(self):
+        super().__init__()
+        backbone = tv_models.efficientnet_b0(weights=tv_models.EfficientNet_B0_Weights.DEFAULT)
+        feats = backbone.features
+        # Group into 5 stages by spatial resolution:
+        #   stage1 (H/2):  features[0..1] -> 16 ch
+        #   stage2 (H/4):  features[2]    -> 24 ch
+        #   stage3 (H/8):  features[3]    -> 40 ch
+        #   stage4 (H/16): features[4..5] -> 112 ch
+        #   stage5 (H/32): features[6..7] -> 320 ch
+        self.stage1 = nn.Sequential(*feats[0:2])
+        self.stage2 = feats[2]
+        self.stage3 = feats[3]
+        self.stage4 = nn.Sequential(*feats[4:6])
+        self.stage5 = nn.Sequential(*feats[6:8])
+
+    def forward(self, x):
+        x1 = self.stage1(x)
+        x2 = self.stage2(x1)
+        x3 = self.stage3(x2)
+        x4 = self.stage4(x3)
+        x5 = self.stage5(x4)
+        return {"x1": x1, "x2": x2, "x3": x3, "x4": x4, "x5": x5}
+
+
+class MobileNetV3Encoder(nn.Module):
+    """MobileNetV3-Large encoder."""
+    def __init__(self):
+        super().__init__()
+        backbone = tv_models.mobilenet_v3_large(weights=tv_models.MobileNet_V3_Large_Weights.DEFAULT)
+        feats = backbone.features
+        # Group into 5 stages by spatial resolution:
+        #   stage1 (H/2):  features[0..1]   -> 16 ch
+        #   stage2 (H/4):  features[2..3]   -> 24 ch
+        #   stage3 (H/8):  features[4..6]   -> 40 ch
+        #   stage4 (H/16): features[7..12]  -> 112 ch
+        #   stage5 (H/32): features[13..16] -> 960 ch
+        self.stage1 = nn.Sequential(*feats[0:2])
+        self.stage2 = nn.Sequential(*feats[2:4])
+        self.stage3 = nn.Sequential(*feats[4:7])
+        self.stage4 = nn.Sequential(*feats[7:13])
+        self.stage5 = nn.Sequential(*feats[13:17])
+
+    def forward(self, x):
+        x1 = self.stage1(x)
+        x2 = self.stage2(x1)
+        x3 = self.stage3(x2)
+        x4 = self.stage4(x3)
+        x5 = self.stage5(x4)
+        return {"x1": x1, "x2": x2, "x3": x3, "x4": x4, "x5": x5}
+
+
+def get_encoder(name: str):
+    """Factory function returning (encoder_module, channels_list).
+
+    channels_list = [x1_ch, x2_ch, x3_ch, x4_ch, x5_ch]
+    """
+    if name not in ENCODER_CONFIGS:
+        raise ValueError(f"Unknown encoder '{name}'. Choose from: {list(ENCODER_CONFIGS.keys())}")
+    channels = ENCODER_CONFIGS[name]['channels']
+    if name == 'densenet121':
+        return DenseNetEncoder(), channels
+    elif name == 'resnet50':
+        return ResNetEncoder(), channels
+    elif name == 'efficientnet_b0':
+        return EfficientNetEncoder(), channels
+    elif name == 'mobilenet_v3_large':
+        return MobileNetV3Encoder(), channels
+    else:
+        raise ValueError(f"No encoder class for '{name}'")
+
+
+# Keep legacy alias for backward compat
+DenseNet = DenseNetEncoder
+
+
 class SuperNet(nn.Module):
     """
-    SuperNet with configurable search space.
+    SuperNet with configurable search space and encoder.
 
     Args:
         n_class: number of output classes
         search_space: 'basic', 'extended', or 'industry'
+        encoder_name: encoder backbone name (see ENCODER_CONFIGS)
     """
-    def __init__(self, n_class, search_space='basic'):
+    def __init__(self, n_class, search_space='basic', encoder_name='densenet121'):
         super().__init__()
         self.n_class = n_class
         self.search_space = search_space
-        self.pretrained_net = DenseNet()
+        self.encoder_name = encoder_name
+
+        self.pretrained_net, enc_channels = get_encoder(encoder_name)
+        # enc_channels = [x1, x2, x3, x4, x5]
+        self.encoder_channels = enc_channels
+
+        # Derive decoder channel chain from encoder
+        # deconv1: x5 -> x4 resolution
+        # deconv2: x4 -> x3 resolution
+        # deconv3: x3 -> x2 resolution
+        # deconv4: x2 -> x1 resolution
+        # deconv5: x1 -> full resolution
+        c5, c4, c3, c2, c1 = enc_channels[4], enc_channels[3], enc_channels[2], enc_channels[1], enc_channels[0]
+        c_final = max(c1 // 2, 16)  # final output channels before classifier
+        self.decoder_channels = [
+            (c5, c4),       # deconv1
+            (c4, c3),       # deconv2
+            (c3, c2),       # deconv3
+            (c2, c1),       # deconv4
+            (c1, c_final),  # deconv5
+        ]
 
         if search_space == 'industry':
-            # Industry search space: 7 ops x 3 widths
             self.op_names = list(ALL_OP_NAMES)
             self.width_mults = list(WIDTH_MULTS)
-            self.deconv1 = MixedOpWithWidth(1024, 512, op_names=self.op_names, width_mults=self.width_mults)
-            self.deconv2 = MixedOpWithWidth(512, 256, op_names=self.op_names, width_mults=self.width_mults)
-            self.deconv3 = MixedOpWithWidth(256, 128, op_names=self.op_names, width_mults=self.width_mults)
-            self.deconv4 = MixedOpWithWidth(128, 64, op_names=self.op_names, width_mults=self.width_mults)
-            self.deconv5 = MixedOpWithWidth(64, 32, op_names=self.op_names, width_mults=self.width_mults)
+            for i, (cin, cout) in enumerate(self.decoder_channels, 1):
+                setattr(self, f'deconv{i}',
+                        MixedOpWithWidth(cin, cout, op_names=self.op_names, width_mults=self.width_mults))
         elif search_space == 'extended':
-            # Extended search space: 5 ops x 3 widths
             self.op_names = list(STANDARD_OP_NAMES)
             self.width_mults = list(WIDTH_MULTS)
-            self.deconv1 = MixedOpWithWidth(1024, 512, op_names=self.op_names, width_mults=self.width_mults)
-            self.deconv2 = MixedOpWithWidth(512, 256, op_names=self.op_names, width_mults=self.width_mults)
-            self.deconv3 = MixedOpWithWidth(256, 128, op_names=self.op_names, width_mults=self.width_mults)
-            self.deconv4 = MixedOpWithWidth(128, 64, op_names=self.op_names, width_mults=self.width_mults)
-            self.deconv5 = MixedOpWithWidth(64, 32, op_names=self.op_names, width_mults=self.width_mults)
+            for i, (cin, cout) in enumerate(self.decoder_channels, 1):
+                setattr(self, f'deconv{i}',
+                        MixedOpWithWidth(cin, cout, op_names=self.op_names, width_mults=self.width_mults))
         else:
-            # Basic search space (5 operations only)
             self.op_names = list(STANDARD_OP_NAMES)
             self.width_mults = [1.0]
-            self.deconv1 = MixedOp(1024, 512, op_names=self.op_names)
-            self.deconv2 = MixedOp(512, 256, op_names=self.op_names)
-            self.deconv3 = MixedOp(256, 128, op_names=self.op_names)
-            self.deconv4 = MixedOp(128, 64, op_names=self.op_names)
-            self.deconv5 = MixedOp(64, 32, op_names=self.op_names)
+            for i, (cin, cout) in enumerate(self.decoder_channels, 1):
+                setattr(self, f'deconv{i}',
+                        MixedOp(cin, cout, op_names=self.op_names))
 
-        self.classifier = nn.Conv2d(32, n_class, kernel_size=1)
+        self.classifier = nn.Conv2d(c_final, n_class, kernel_size=1)
+
+    def _deconvs(self):
+        return [self.deconv1, self.deconv2, self.deconv3, self.deconv4, self.deconv5]
 
     def forward(self, x, temperature=1.0, hard=False):
         output = self.pretrained_net(x)
 
-        x5 = output["x5"]  # size=(N, 512, x.H/32, x.W/32)
-        x4 = output["x4"]  # size=(N, 512, x.H/16, x.W/16)
-        x3 = output["x3"]  # size=(N, 256, x.H/8,  x.W/8)
-        x2 = output["x2"]  # size=(N, 128, x.H/4,  x.W/4)
-        x1 = output["x1"]  # size=(N, 64, x.H/2,  x.W/2)
+        x5 = output["x5"]
+        x4 = output["x4"]
+        x3 = output["x3"]
+        x2 = output["x2"]
+        x1 = output["x1"]
 
-        score = self.deconv1(x5, temperature=temperature, hard=hard)  # size=(N, 512, x.H/16, x.W/16)
-        score = score + x4  # element-wise add, size=(N, 512, x.H/16, x.W/16)
-        score = self.deconv2(score, temperature=temperature, hard=hard)  # size=(N, 256, x.H/8, x.W/8)
-        score = score + x3  # element-wise add, size=(N, 256, x.H/8, x.W/8)
-        score = self.deconv3(score, temperature=temperature, hard=hard)  # size=(N, 128, x.H/4, x.W/4)
-        score = score + x2  # element-wise add, size=(N, 128, x.H/4, x.W/4)
-        score = self.deconv4(score, temperature=temperature, hard=hard)  # size=(N, 64, x.H/2, x.W/2)
-        score = score + x1  # element-wise add, size=(N, 64, x.H/2, x.W/2)
-        score = self.deconv5(score, temperature=temperature, hard=hard)  # size=(N, 32, x.H, x.W)
-        score = self.classifier(score)  # size=(N, n_class, x.H/1, x.W/1)
+        score = self.deconv1(x5, temperature=temperature, hard=hard)
+        score = score + x4
+        score = self.deconv2(score, temperature=temperature, hard=hard)
+        score = score + x3
+        score = self.deconv3(score, temperature=temperature, hard=hard)
+        score = score + x2
+        score = self.deconv4(score, temperature=temperature, hard=hard)
+        score = score + x1
+        score = self.deconv5(score, temperature=temperature, hard=hard)
+        score = self.classifier(score)
 
-        return score  # size=(N, n_class, x.H/1, x.W/1)
+        return score
 
     def clip_alphas(self):
-        self.deconv1.clip_alphas()
-        self.deconv2.clip_alphas()
-        self.deconv3.clip_alphas()
-        self.deconv4.clip_alphas()
-        self.deconv5.clip_alphas()
+        for d in self._deconvs():
+            d.clip_alphas()
 
     def get_alphas(self):
         """Return alpha values for logging"""
         if self.search_space in ('extended', 'industry'):
-            alpha_list = []
-            for deconv in [self.deconv1, self.deconv2, self.deconv3, self.deconv4, self.deconv5]:
-                alpha_list.append({
-                    'op': deconv.alphas_op.cpu().detach().numpy().tolist(),
-                    'width': deconv.alphas_width.cpu().detach().numpy().tolist()
-                })
-            return alpha_list
+            return [{'op': d.alphas_op.cpu().detach().numpy().tolist(),
+                      'width': d.alphas_width.cpu().detach().numpy().tolist()}
+                     for d in self._deconvs()]
         else:
-            alpha_list = [
-                self.deconv1.alphas.cpu().detach().numpy().tolist(),
-                self.deconv2.alphas.cpu().detach().numpy().tolist(),
-                self.deconv3.alphas.cpu().detach().numpy().tolist(),
-                self.deconv4.alphas.cpu().detach().numpy().tolist(),
-                self.deconv5.alphas.cpu().detach().numpy().tolist(),
-            ]
-            return alpha_list
+            return [d.alphas.cpu().detach().numpy().tolist() for d in self._deconvs()]
 
     def get_alpha_params(self):
         """Return all alpha parameters for optimizer"""
         if self.search_space in ('extended', 'industry'):
             params = []
-            for deconv in [self.deconv1, self.deconv2, self.deconv3, self.deconv4, self.deconv5]:
-                params.append(deconv.alphas_op)
-                params.append(deconv.alphas_width)
+            for d in self._deconvs():
+                params.append(d.alphas_op)
+                params.append(d.alphas_width)
             return params
         else:
-            return [
-                self.deconv1.alphas,
-                self.deconv2.alphas,
-                self.deconv3.alphas,
-                self.deconv4.alphas,
-                self.deconv5.alphas,
-            ]
+            return [d.alphas for d in self._deconvs()]
 
     def get_arch_description(self):
         """Return human-readable architecture description"""
-        desc = []
-        for i, deconv in enumerate([self.deconv1, self.deconv2, self.deconv3, self.deconv4, self.deconv5], 1):
-            desc.append(f"deconv{i}: {deconv.get_op_name()}")
-        return desc
+        return [f"deconv{i}: {d.get_op_name()}" for i, d in enumerate(self._deconvs(), 1)]
 
     def get_sampled_flops(self, input_size=128, temperature=1.0):
-        """
-        Calculate FLOPs using Gumbel-Softmax sampling (differentiable).
-        Returns FLOPs closer to the actual selected operation.
-        """
+        """Calculate FLOPs using Gumbel-Softmax sampling (differentiable)."""
         H = input_size // 32
-        sizes = [
-            (H * 2, H * 2),      # deconv1: 4 -> 8
-            (H * 4, H * 4),      # deconv2: 8 -> 16
-            (H * 8, H * 8),      # deconv3: 16 -> 32
-            (H * 16, H * 16),    # deconv4: 32 -> 64
-            (H * 32, H * 32),    # deconv5: 64 -> 128
-        ]
-
+        sizes = [(H * 2, H * 2), (H * 4, H * 4), (H * 8, H * 8),
+                 (H * 16, H * 16), (H * 32, H * 32)]
         total_flops = 0
-        total_flops += self.deconv1.get_sampled_flops(sizes[0][0], sizes[0][1], temperature)
-        total_flops += self.deconv2.get_sampled_flops(sizes[1][0], sizes[1][1], temperature)
-        total_flops += self.deconv3.get_sampled_flops(sizes[2][0], sizes[2][1], temperature)
-        total_flops += self.deconv4.get_sampled_flops(sizes[3][0], sizes[3][1], temperature)
-        total_flops += self.deconv5.get_sampled_flops(sizes[4][0], sizes[4][1], temperature)
-
-        return total_flops / 1e9  # Return in GFLOPs
+        for d, (h, w) in zip(self._deconvs(), sizes):
+            total_flops += d.get_sampled_flops(h, w, temperature)
+        return total_flops / 1e9
 
     def get_argmax_flops(self, input_size=128):
-        """
-        Calculate FLOPs of argmax selected operations (non-differentiable, for logging).
-        """
+        """Calculate FLOPs of argmax selected operations (non-differentiable, for logging)."""
         H = input_size // 32
-        sizes = [
-            (H * 2, H * 2),
-            (H * 4, H * 4),
-            (H * 8, H * 8),
-            (H * 16, H * 16),
-            (H * 32, H * 32),
-        ]
-
+        sizes = [(H * 2, H * 2), (H * 4, H * 4), (H * 8, H * 8),
+                 (H * 16, H * 16), (H * 32, H * 32)]
         total_flops = 0
-        total_flops += self.deconv1.get_argmax_flops(sizes[0][0], sizes[0][1])
-        total_flops += self.deconv2.get_argmax_flops(sizes[1][0], sizes[1][1])
-        total_flops += self.deconv3.get_argmax_flops(sizes[2][0], sizes[2][1])
-        total_flops += self.deconv4.get_argmax_flops(sizes[3][0], sizes[3][1])
-        total_flops += self.deconv5.get_argmax_flops(sizes[4][0], sizes[4][1])
-
-        return total_flops / 1e9  # Return in GFLOPs
+        for d, (h, w) in zip(self._deconvs(), sizes):
+            total_flops += d.get_argmax_flops(h, w)
+        return total_flops / 1e9
 
     def get_arch_indices(self):
         """
@@ -198,78 +284,45 @@ class SuperNet(nn.Module):
             op_indices: Tensor of shape [5] with operation indices
             width_indices: Tensor of shape [5] with width indices
         """
-        deconvs = [self.deconv1, self.deconv2, self.deconv3, self.deconv4, self.deconv5]
-
+        deconvs = self._deconvs()
         if self.search_space in ('extended', 'industry'):
             op_indices = []
             width_indices = []
-            for deconv in deconvs:
-                op_idx, width_idx = deconv.get_arch_indices()
+            for d in deconvs:
+                op_idx, width_idx = d.get_arch_indices()
                 op_indices.append(op_idx)
                 width_indices.append(width_idx)
             return torch.tensor(op_indices), torch.tensor(width_indices)
         else:
-            # Basic search space: only op indices, width is always 1.0
-            op_indices = [deconv.get_max_alpha_idx() for deconv in deconvs]
-            width_indices = [len(WIDTH_MULTS) - 1] * len(deconvs)  # Index for width 1.0
+            op_indices = [d.get_max_alpha_idx() for d in deconvs]
+            width_indices = [len(WIDTH_MULTS) - 1] * len(deconvs)
             return torch.tensor(op_indices), torch.tensor(width_indices)
 
     def get_sampled_latency(self, latency_lut, temperature=1.0):
-        """
-        Calculate total latency using LUT and Gumbel-Softmax (differentiable).
-
-        Args:
-            latency_lut: LatencyLUT object with measured latencies
-            temperature: Gumbel-Softmax temperature
-
-        Returns:
-            Total latency in milliseconds (differentiable)
-        """
+        """Calculate total latency using LUT and Gumbel-Softmax (differentiable)."""
         if self.search_space not in ('extended', 'industry'):
             raise NotImplementedError("Latency sampling only supported for width-aware search spaces")
-
-        deconvs = [self.deconv1, self.deconv2, self.deconv3, self.deconv4, self.deconv5]
-
+        deconvs = self._deconvs()
         total_latency = deconvs[0].alphas_op.new_tensor(0.0)
-        for layer_idx, deconv in enumerate(deconvs):
-            total_latency = total_latency + deconv.get_sampled_latency(
-                latency_lut, layer_idx, temperature
-            )
-
+        for layer_idx, d in enumerate(deconvs):
+            total_latency = total_latency + d.get_sampled_latency(latency_lut, layer_idx, temperature)
         return total_latency
 
     def get_argmax_latency(self, latency_lut):
-        """
-        Get total latency of argmax selected architecture (non-differentiable).
-
-        Args:
-            latency_lut: LatencyLUT object
-
-        Returns:
-            Total latency in milliseconds
-        """
+        """Get total latency of argmax selected architecture (non-differentiable)."""
         if self.search_space not in ('extended', 'industry'):
             raise NotImplementedError("Latency only supported for width-aware search spaces")
-
-        deconvs = [self.deconv1, self.deconv2, self.deconv3, self.deconv4, self.deconv5]
-
         total_latency = 0.0
-        for layer_idx, deconv in enumerate(deconvs):
-            total_latency += deconv.get_argmax_latency(latency_lut, layer_idx)
-
+        for layer_idx, d in enumerate(self._deconvs()):
+            total_latency += d.get_argmax_latency(latency_lut, layer_idx)
         return total_latency
 
     def set_active_widths(self, active_width_indices):
-        """Set active widths for all decoder layers (progressive shrinking).
-
-        Args:
-            active_width_indices: List of indices into WIDTH_MULTS that should be active.
-                                 e.g., [2] for width=1.0 only
-        """
+        """Set active widths for all decoder layers (progressive shrinking)."""
         if self.search_space not in ('extended', 'industry'):
             return
-        for deconv in [self.deconv1, self.deconv2, self.deconv3, self.deconv4, self.deconv5]:
-            deconv.set_active_widths(active_width_indices)
+        for d in self._deconvs():
+            d.set_active_widths(active_width_indices)
 
     def get_active_widths(self):
         """Return current active width indices."""
@@ -279,9 +332,7 @@ class SuperNet(nn.Module):
 
     @torch.no_grad()
     def forward_teacher(self, x):
-        """Forward pass with the largest subnet (width=1.0 only).
-        Used as the teacher for knowledge distillation during progressive shrinking.
-        """
+        """Forward pass with the largest subnet (width=1.0 only)."""
         original_indices = self.get_active_widths()
         max_width_idx = len(self.width_mults) - 1
         self.set_active_widths([max_width_idx])
@@ -294,26 +345,18 @@ class SuperNet(nn.Module):
         Get normalized alpha weights for all layers (for latency predictor).
 
         Returns:
-            op_weights: Tensor [5, num_ops] - softmax weights for operations
-            width_weights: Tensor [5, num_widths] - softmax weights for widths
+            op_weights: Tensor [5, num_ops]
+            width_weights: Tensor [5, num_widths]
         """
-        deconvs = [self.deconv1, self.deconv2, self.deconv3, self.deconv4, self.deconv5]
-
+        deconvs = self._deconvs()
         if self.search_space in ('extended', 'industry'):
-            op_weights = torch.stack([
-                torch.softmax(d.alphas_op, dim=0) for d in deconvs
-            ])
-            width_weights = torch.stack([
-                torch.softmax(d.alphas_width, dim=0) for d in deconvs
-            ])
+            op_weights = torch.stack([torch.softmax(d.alphas_op, dim=0) for d in deconvs])
+            width_weights = torch.stack([torch.softmax(d.alphas_width, dim=0) for d in deconvs])
             return op_weights, width_weights
         else:
-            op_weights = torch.stack([
-                torch.softmax(d.alphas, dim=0) for d in deconvs
-            ])
-            # For basic search space, width is always 1.0
+            op_weights = torch.stack([torch.softmax(d.alphas, dim=0) for d in deconvs])
             width_weights = op_weights.new_zeros((5, len(WIDTH_MULTS)))
-            width_weights[:, -1] = 1.0  # Last index = width 1.0
+            width_weights[:, -1] = 1.0
             return op_weights, width_weights
 
 
@@ -331,10 +374,8 @@ class OptimizedNetwork(nn.Module):
         self.pretrained_net = copy.deepcopy(module.pretrained_net)
 
         if self.search_space in ('extended', 'industry'):
-            # For extended search space, we need to extract op + bn + optional projection
             self._setup_extended_deconv(module)
         else:
-            # For basic search space
             self.deconv1 = copy.deepcopy(module.deconv1.get_max_op())
             self.bn1 = copy.deepcopy(module.deconv1.bn)
             self.deconv2 = copy.deepcopy(module.deconv2.get_max_op())

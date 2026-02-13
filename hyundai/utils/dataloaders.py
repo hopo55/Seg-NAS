@@ -42,7 +42,7 @@ def _resolve_label_path(label_path):
     return label_path
 
 def set_transforms(resize=128):
-    # set up transforms
+    """Base transform (no augmentation) — used for val/test."""
     transform = transforms.Compose(
         [
             transforms.ToTensor(),
@@ -50,6 +50,78 @@ def set_transforms(resize=128):
         ]
     )
     return transform
+
+
+class PairedAugmentation:
+    """Apply geometric augmentations identically to image and label,
+    and color augmentations only to the image.
+
+    Usage: pass an instance as the ``transform`` argument to ImageDataset.
+    ImageDataset.__getitem__ will call ``transform(image, label)`` when the
+    transform is callable with two arguments (duck-typed via ``paired``
+    attribute).
+
+    Args:
+        resize: Target spatial size (square).
+        hflip_p: Probability of horizontal flip.
+        vflip_p: Probability of vertical flip.
+        rotate_degrees: Max rotation angle in degrees (± uniform).
+        color_jitter: Dict of ColorJitter kwargs applied only to the image.
+    """
+
+    def __init__(self, resize=128, hflip_p=0.5, vflip_p=0.3,
+                 rotate_degrees=15, color_jitter=None):
+        self.resize = resize
+        self.hflip_p = hflip_p
+        self.vflip_p = vflip_p
+        self.rotate_degrees = rotate_degrees
+        self.paired = True  # marker for ImageDataset to detect paired mode
+
+        if color_jitter is None:
+            color_jitter = dict(brightness=0.2, contrast=0.2, saturation=0.1)
+        self.color_jitter = transforms.ColorJitter(**color_jitter)
+
+    def __call__(self, image, label):
+        """
+        Args:
+            image: numpy BGR image (H, W, 3)
+            label: numpy grayscale image (H, W)
+
+        Returns:
+            image_tensor: (3, resize, resize) float32
+            label_tensor: (resize, resize) float32
+        """
+        # --- To tensor + resize (both) ---
+        to_tensor = transforms.ToTensor()
+        image = to_tensor(image)   # (3, H, W)
+        label = to_tensor(label)   # (1, H, W)
+
+        resize_fn = transforms.Resize((self.resize, self.resize))
+        image = resize_fn(image)
+        label = resize_fn(label)
+
+        # --- Geometric augmentations (applied identically) ---
+        # Horizontal flip
+        if random.random() < self.hflip_p:
+            image = transforms.functional.hflip(image)
+            label = transforms.functional.hflip(label)
+
+        # Vertical flip
+        if random.random() < self.vflip_p:
+            image = transforms.functional.vflip(image)
+            label = transforms.functional.vflip(label)
+
+        # Random rotation
+        if self.rotate_degrees > 0:
+            angle = random.uniform(-self.rotate_degrees, self.rotate_degrees)
+            image = transforms.functional.rotate(image, angle)
+            label = transforms.functional.rotate(label, angle)
+
+        # --- Color augmentation (image only) ---
+        image = self.color_jitter(image)
+
+        label = label.squeeze(0)  # (H, W)
+        return image, label
 
 # Split data into train, validation, and test sets based on cycle(folder) / 기존 방식
 def load_folder_cycle(data_dir, ratios):
@@ -207,15 +279,18 @@ class ImageDataset(Dataset):
         # check if data and label are the same name after ../(dir)/
         label_dir = _replace_dir_component(self.data[idx], self.source_dir_name, self.label_dir_name)
         label_dir = _resolve_label_path(label_dir)
-        
+
         image = cv2.imread(self.data[idx])
         label = cv2.imread(label_dir, cv2.IMREAD_GRAYSCALE)
 
-        if self.transform:
+        if self.transform and getattr(self.transform, 'paired', False):
+            # PairedAugmentation: returns (image_tensor, label_1hw)
+            image, label = self.transform(image, label)
+        elif self.transform:
             image = self.transform(image)
             label = self.transform(label)
+            label = label.squeeze(0)  # Remove the channel dimension
 
-        label = label.squeeze(0)  # Remove the channel dimension
         label = (label >= 0.5).long()  # Threshold to create binary mask
 
         # Create a two-channel mask for background and target

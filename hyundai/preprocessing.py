@@ -2,7 +2,7 @@ import os
 import sys
 import pandas as pd
 from PIL import Image
-from utils.dataloaders import load_folder_model, load_zero_shot, set_transforms, ImageDataset
+from utils.dataloaders import load_folder_model, load_zero_shot, set_transforms, PairedAugmentation, ImageDataset
 
 
 def get_roi(names):
@@ -139,6 +139,7 @@ def get_dataset(args):
             dataset = load_folder_model(args.data_dir, args.ratios, args.data, args.train_val_split)
 
     transform = set_transforms(args.resize)
+    train_transform = PairedAugmentation(resize=args.resize)
     label_dir_name = getattr(args, 'label_dir_name', 'target')
     source_dir_name = os.path.basename(os.path.normpath(args.data_dir))
 
@@ -153,7 +154,7 @@ def get_dataset(args):
 
         train_dataset = ImageDataset(
             train_data,
-            transform,
+            train_transform,
             label_dir_name=label_dir_name,
             source_dir_name=source_dir_name,
         )
