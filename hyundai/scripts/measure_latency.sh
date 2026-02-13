@@ -29,6 +29,7 @@
 INPUT_SIZE=${INPUT_SIZE:-128}
 WARMUP=200
 REPEAT=300
+ENCODER=${ENCODER:-densenet121}
 OUTPUT_DIR='./hyundai/latency/luts'
 
 # Optional: hardware name override (for CPU-only devices)
@@ -40,6 +41,7 @@ echo "=============================================="
 echo "Latency LUT Measurement"
 echo "=============================================="
 echo "Input Size: ${INPUT_SIZE}x${INPUT_SIZE}"
+echo "Encoder: $ENCODER"
 echo "Warmup: $WARMUP iterations"
 echo "Repeat: $REPEAT iterations"
 echo "Output Dir: $OUTPUT_DIR"
@@ -64,7 +66,8 @@ from latency.lut_builder import LatencyLUTBuilder
 builder = LatencyLUTBuilder(
     input_size=${INPUT_SIZE},
     warmup=${WARMUP},
-    repeat=${REPEAT}
+    repeat=${REPEAT},
+    encoder_name='${ENCODER}'
 )
 
 hardware_name = '${HARDWARE_NAME}' if '${HARDWARE_NAME}' else None

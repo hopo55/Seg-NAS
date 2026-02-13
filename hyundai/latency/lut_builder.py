@@ -82,18 +82,29 @@ class LatencyLUTBuilder:
     """
 
     def __init__(self, input_size: int = 128, warmup: int = 200, repeat: int = 300,
-                 encoder_name: str = 'densenet121'):
+                 encoder_name: str = 'densenet121',
+                 input_h: Optional[int] = None, input_w: Optional[int] = None):
         """
         Args:
-            input_size: Input image size (assumes square)
+            input_size: Input image size (square, used when input_h/input_w not set)
             warmup: Number of warmup iterations
             repeat: Number of measurement iterations
             encoder_name: Encoder backbone name (determines decoder channel sizes)
+            input_h: Input height (overrides input_size if set with input_w)
+            input_w: Input width (overrides input_size if set with input_h)
         """
-        self.input_size = input_size
         self.warmup = warmup
         self.repeat = repeat
         self.encoder_name = encoder_name
+
+        # Resolve input dimensions (non-square support)
+        if input_h is not None and input_w is not None:
+            self.input_h = input_h
+            self.input_w = input_w
+        else:
+            self.input_h = input_size
+            self.input_w = input_size
+        self.input_size = f"{self.input_h}x{self.input_w}"
 
         # Derive layer configurations from encoder channels
         from nas.supernet_dense import ENCODER_CONFIGS
@@ -101,13 +112,14 @@ class LatencyLUTBuilder:
         c5, c4, c3, c2, c1 = enc[4], enc[3], enc[2], enc[1], enc[0]
         c_final = max(c1 // 2, 16)
 
-        H = input_size // 32
+        H = self.input_h // 32
+        W = self.input_w // 32
         self.layer_configs = [
-            {'C_in': c5, 'C_out': c4, 'H_out': H * 2, 'W_out': H * 2},         # deconv1
-            {'C_in': c4, 'C_out': c3, 'H_out': H * 4, 'W_out': H * 4},         # deconv2
-            {'C_in': c3, 'C_out': c2, 'H_out': H * 8, 'W_out': H * 8},         # deconv3
-            {'C_in': c2, 'C_out': c1, 'H_out': H * 16, 'W_out': H * 16},       # deconv4
-            {'C_in': c1, 'C_out': c_final, 'H_out': H * 32, 'W_out': H * 32},  # deconv5
+            {'C_in': c5, 'C_out': c4, 'H_out': H * 2, 'W_out': W * 2},         # deconv1
+            {'C_in': c4, 'C_out': c3, 'H_out': H * 4, 'W_out': W * 4},         # deconv2
+            {'C_in': c3, 'C_out': c2, 'H_out': H * 8, 'W_out': W * 8},         # deconv3
+            {'C_in': c2, 'C_out': c1, 'H_out': H * 16, 'W_out': W * 16},       # deconv4
+            {'C_in': c1, 'C_out': c_final, 'H_out': H * 32, 'W_out': W * 32},  # deconv5
         ]
 
     def _create_operation(self, op_name: str, C_in: int, C_out: int,
@@ -232,6 +244,8 @@ class LatencyLUTBuilder:
         lut = {
             'hardware': hardware_name,
             'input_size': self.input_size,
+            'input_h': self.input_h,
+            'input_w': self.input_w,
             'warmup': self.warmup,
             'repeat': self.repeat,
             'layers': {}
@@ -425,11 +439,16 @@ if __name__ == '__main__':
     ap.add_argument('--encoder_name', type=str, default='densenet121',
                     choices=['densenet121', 'resnet50', 'efficientnet_b0', 'mobilenet_v3_large'])
     ap.add_argument('--input_size', type=int, default=128)
+    ap.add_argument('--input_h', type=int, default=None,
+                    help='Input height (overrides input_size if set with --input_w)')
+    ap.add_argument('--input_w', type=int, default=None,
+                    help='Input width (overrides input_size if set with --input_h)')
     ap.add_argument('--hardware_name', type=str, default=None,
                     help='Override hardware name (for CPU-only devices)')
     cli_args = ap.parse_args()
 
     builder = LatencyLUTBuilder(input_size=cli_args.input_size, warmup=200, repeat=300,
-                                encoder_name=cli_args.encoder_name)
+                                encoder_name=cli_args.encoder_name,
+                                input_h=cli_args.input_h, input_w=cli_args.input_w)
     luts = builder.build_all_hardware_luts(hardware_name=cli_args.hardware_name)
     print("\nLUT building complete!")

@@ -81,7 +81,8 @@ class LatencyLUT:
             from .lut_builder import OP_NAMES
             op_names = list(OP_NAMES)
         if width_mults is None:
-            width_mults = [0.5, 0.75, 1.0]
+            from .lut_builder import WIDTH_MULTS
+            width_mults = list(WIDTH_MULTS)
 
         total_latency = 0.0
 
@@ -110,7 +111,8 @@ class LatencyLUT:
             from .lut_builder import OP_NAMES
             op_names = list(OP_NAMES)
         if width_mults is None:
-            width_mults = [0.5, 0.75, 1.0]
+            from .lut_builder import WIDTH_MULTS
+            width_mults = list(WIDTH_MULTS)
 
         latencies = []
         for op_name in op_names:

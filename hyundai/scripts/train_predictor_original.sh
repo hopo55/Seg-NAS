@@ -1,23 +1,27 @@
 #!/bin/bash
 # =============================================================================
-# CrossHardwareLatencyPredictor Training Script
+# CrossHardwareLatencyPredictor Training Script (Original Image Size)
 # =============================================================================
 #
-# This script trains the latency predictor using LUT data from multiple hardware.
-# Run this AFTER measuring LUTs on all target hardware.
+# This script trains the latency predictor using LUT data measured with
+# original image sizes (e.g., 640x480).
 #
 # Prerequisites:
-#   1. Run measure_latency.sh on each hardware (A6000, RTX3090, RTX4090, JetsonOrin)
-#   2. Collect all LUT files in ./hyundai/latency/luts/
+#   1. Run measure_latency_original.sh on each hardware
+#   2. Collect all LUT files in ./hyundai/latency/luts_original/
 #
 # Usage:
-#   bash hyundai/scripts/train_predictor.sh
+#   bash hyundai/scripts/train_predictor_original.sh
+#   LUT_SUFFIX=_original bash hyundai/scripts/train_predictor_original.sh
 #
 # =============================================================================
 
+set -euo pipefail
+
 # Settings
-LUT_DIR='./hyundai/latency/luts'
-OUTPUT_PATH='./hyundai/latency/predictor.pt'
+LUT_DIR='./hyundai/latency/luts_original'
+OUTPUT_PATH=${OUTPUT_PATH:-'./hyundai/latency/predictor_original.pt'}
+LUT_SUFFIX=${LUT_SUFFIX:-_original}
 NUM_EPOCHS=200
 BATCH_SIZE=64
 LR=0.001
@@ -31,8 +35,10 @@ PYTHON=${PYTHON:-python3}
 
 echo "=============================================="
 echo "CrossHardwareLatencyPredictor Training"
+echo "  (Original Image Size)"
 echo "=============================================="
 echo "LUT Directory: $LUT_DIR"
+echo "LUT Suffix: $LUT_SUFFIX"
 echo "Output: $OUTPUT_PATH"
 echo "Epochs: $NUM_EPOCHS"
 echo "Num Ops: $NUM_OPS"
@@ -40,15 +46,16 @@ echo "Num Widths: $NUM_WIDTHS"
 echo "=============================================="
 
 # Check if LUTs exist
-LUT_COUNT=$(ls -1 $LUT_DIR/*.json 2>/dev/null | wc -l)
+LUT_PATTERN="lut_*${LUT_SUFFIX}.json"
+LUT_COUNT=$(find "$LUT_DIR" -maxdepth 1 -type f -name "$LUT_PATTERN" | wc -l)
 if [ "$LUT_COUNT" -eq 0 ]; then
-    echo "Error: No LUT files found in $LUT_DIR"
-    echo "Please run measure_latency.sh on each hardware first."
+    echo "Error: No LUT files found in $LUT_DIR matching $LUT_PATTERN"
+    echo "Please run measure_latency_original.sh on each hardware first."
     exit 1
 fi
 
-echo "Found $LUT_COUNT LUT files:"
-ls -1 $LUT_DIR/*.json
+echo "Found $LUT_COUNT LUT files ($LUT_PATTERN):"
+find "$LUT_DIR" -maxdepth 1 -type f -name "$LUT_PATTERN" | sort
 
 # Train predictor
 $PYTHON -c "
@@ -67,6 +74,7 @@ from nas.search_space import ALL_OP_NAMES, WIDTH_MULTS
 
 NUM_OPS = ${NUM_OPS}
 NUM_WIDTHS = ${NUM_WIDTHS}
+LUT_SUFFIX = '${LUT_SUFFIX}'
 
 # Verify search space dimensions
 assert len(ALL_OP_NAMES) == NUM_OPS, \
@@ -77,15 +85,16 @@ assert len(WIDTH_MULTS) == NUM_WIDTHS, \
 # Load all LUTs
 lut_dir = Path('${LUT_DIR}')
 luts = {}
+lut_pattern = f'lut_*{LUT_SUFFIX}.json'
 
-for lut_file in lut_dir.glob('*.json'):
+for lut_file in lut_dir.glob(lut_pattern):
     lut = LatencyLUT(str(lut_file))
     hw_name = lut.hardware_name
     if hw_name not in HARDWARE_SPECS:
         print(f'Skipping LUT (unknown hardware): {hw_name}')
         continue
     luts[hw_name] = lut
-    print(f'Loaded LUT: {hw_name}')
+    print(f'Loaded LUT: {hw_name} (input: {lut.lut.get(\"input_h\", \"?\")}x{lut.lut.get(\"input_w\", \"?\")})')
 
 if len(luts) < 2:
     print('Warning: Less than 2 hardware LUTs found.')

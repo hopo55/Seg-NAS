@@ -108,11 +108,12 @@ PARETO_SAMPLES=1000     # Number of architectures to sample
 PARETO_EVAL_SUBSET=5  # Number to actually evaluate
 PARETO_REFINE_TOPK=1    # Re-evaluate top-k as extracted subnet before final pick
 
-# LUT directory
-LUT_DIR='./hyundai/latency/luts'
+# LUT directory (overridable via env for original-size experiments)
+LUT_DIR=${LUT_DIR:-'./hyundai/latency/luts'}
+LUT_SUFFIX=${LUT_SUFFIX:-}
 
-# Cross-hardware latency predictor (enables multi-device optimization in Phase 1)
-PREDICTOR_PATH='./hyundai/latency/predictor.pt'
+# Cross-hardware latency predictor (overridable via env)
+PREDICTOR_PATH=${PREDICTOR_PATH:-'./hyundai/latency/predictor.pt'}
 
 # Mode from command line argument (default: pareto)
 MODE_ARG=${1:-pareto}
@@ -135,18 +136,44 @@ fi
 
 PYTHON=${PYTHON:-python3}
 
+resolve_lut_path() {
+    local hardware=$1
+    local preferred="${LUT_DIR}/lut_${hardware,,}${LUT_SUFFIX}.json"
+
+    if [ -f "$preferred" ]; then
+        echo "$preferred"
+        return 0
+    fi
+
+    if [ -n "$LUT_SUFFIX" ]; then
+        local fallback="${LUT_DIR}/lut_${hardware,,}.json"
+        if [ -f "$fallback" ]; then
+            echo "Warning: missing suffixed LUT '$preferred', falling back to '$fallback'" >&2
+            echo "$fallback"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
 validate_lut_for_search_space() {
     local LUT_PATH=$1
     local SEARCH_SPACE_NAME=$2
     local EXPECTED_INPUT_SIZE=${3:-}
+    local EXPECTED_INPUT_H=${4:-}
+    local EXPECTED_INPUT_W=${5:-}
 
-    $PYTHON - "$LUT_PATH" "$SEARCH_SPACE_NAME" "$EXPECTED_INPUT_SIZE" <<'PY'
+    $PYTHON - "$LUT_PATH" "$SEARCH_SPACE_NAME" "$EXPECTED_INPUT_SIZE" "$EXPECTED_INPUT_H" "$EXPECTED_INPUT_W" <<'PY'
 import json
 import sys
 
 lut_path = sys.argv[1]
 search_space = sys.argv[2]
-expected_input_size = int(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else None
+expected_input_size = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] else None
+expected_h = int(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4] else None
+expected_w = int(sys.argv[5]) if len(sys.argv) > 5 and sys.argv[5] else None
+
 required = ['Conv3x3', 'Conv5x5', 'Conv7x7', 'DWSep3x3', 'DWSep5x5']
 if search_space == 'industry':
     required += ['EdgeConv', 'DilatedDWSep']
@@ -154,14 +181,38 @@ if search_space == 'industry':
 with open(lut_path, 'r') as f:
     lut = json.load(f)
 
-if expected_input_size is not None:
+# Validate input size (supports both square and HxW formats)
+if expected_h is not None and expected_w is not None:
+    lut_h = lut.get('input_h')
+    lut_w = lut.get('input_w')
+    if lut_h is not None and lut_w is not None:
+        if int(lut_h) != expected_h or int(lut_w) != expected_w:
+            print(
+                f"Input size mismatch: LUT={lut_h}x{lut_w}, expected={expected_h}x{expected_w} "
+                f"({lut_path})"
+            )
+            sys.exit(1)
+elif expected_input_size is not None:
     lut_input_size = lut.get('input_size')
-    if lut_input_size is not None and int(lut_input_size) != expected_input_size:
-        print(
-            f"Input size mismatch: LUT={lut_input_size}, RESIZE={expected_input_size} "
-            f"({lut_path})"
-        )
-        sys.exit(1)
+    if lut_input_size is not None:
+        # Handle both "128x128" string and integer formats
+        lut_str = str(lut_input_size)
+        expected_str = str(expected_input_size)
+        # For square: compare as "NxN" or "N"
+        if 'x' in lut_str:
+            h, w = lut_str.split('x')
+            if h != w or h != expected_str:
+                print(
+                    f"Input size mismatch: LUT={lut_input_size}, RESIZE={expected_input_size} "
+                    f"({lut_path})"
+                )
+                sys.exit(1)
+        elif str(lut_input_size) != expected_str:
+            print(
+                f"Input size mismatch: LUT={lut_input_size}, RESIZE={expected_input_size} "
+                f"({lut_path})"
+            )
+            sys.exit(1)
 
 for layer_name, layer_info in lut.get('layers', {}).items():
     ops = layer_info.get('ops', {})
@@ -224,11 +275,11 @@ run_pareto() {
     # Check if at least one LUT exists
     local LUT_COUNT=0
     for HW in A6000 RTX3090 RTX4090 JetsonOrin RaspberryPi5 Odroid; do
-        local LUT_PATH="${LUT_DIR}/lut_${HW,,}.json"
-        if [ -f "$LUT_PATH" ]; then
-            if ! validate_lut_for_search_space "$LUT_PATH" "$SEARCH_SPACE" "$RESIZE"; then
+        local LUT_PATH=""
+        if LUT_PATH=$(resolve_lut_path "$HW"); then
+            if ! validate_lut_for_search_space "$LUT_PATH" "$SEARCH_SPACE" "$RESIZE" "$RESIZE_H" "$RESIZE_W"; then
                 echo "Error: LUT does not match search space '$SEARCH_SPACE': $LUT_PATH"
-                echo "Please regenerate LUTs with measure_latency.sh using INPUT_SIZE=$RESIZE"
+                echo "Please regenerate LUTs with the appropriate measure_latency script"
                 exit 1
             fi
             ((LUT_COUNT++))
@@ -285,9 +336,15 @@ run_single() {
     local SEED=$1
     local HARDWARE=$2
     local TARGET_LAT=${HARDWARE_TARGETS[$HARDWARE]}
-    local LUT_PATH="${LUT_DIR}/lut_${HARDWARE,,}.json"
+    local LUT_PATH=""
     local PS_FLAGS=$(build_ps_flags)
     local CALOFA_FLAGS=$(build_calofa_flags)
+
+    if ! LUT_PATH=$(resolve_lut_path "$HARDWARE"); then
+        echo "Error: LUT file not found for '$HARDWARE' in $LUT_DIR (suffix: '$LUT_SUFFIX')"
+        echo "Please run the appropriate measure_latency script first"
+        exit 1
+    fi
 
     echo "========================================"
     echo "SINGLE-HARDWARE NAS"
@@ -300,14 +357,9 @@ run_single() {
     echo "  Progressive Shrinking: $USE_PS"
     echo "========================================"
 
-    if [ ! -f "$LUT_PATH" ]; then
-        echo "Error: LUT file not found: $LUT_PATH"
-        echo "Please run measure_latency.sh on $HARDWARE first"
-        exit 1
-    fi
-    if ! validate_lut_for_search_space "$LUT_PATH" "$SEARCH_SPACE" "$RESIZE"; then
+    if ! validate_lut_for_search_space "$LUT_PATH" "$SEARCH_SPACE" "$RESIZE" "$RESIZE_H" "$RESIZE_W"; then
         echo "Error: LUT does not match search space '$SEARCH_SPACE': $LUT_PATH"
-        echo "Please regenerate LUTs with measure_latency.sh using INPUT_SIZE=$RESIZE"
+        echo "Please regenerate LUTs with the appropriate measure_latency script"
         exit 1
     fi
 
@@ -357,6 +409,9 @@ echo "Mode: $MODE_ARG"
 echo "Encoder: $ENCODER"
 echo "Search Space: $SEARCH_SPACE"
 echo "Search Backend: $SEARCH_BACKEND"
+if [ -n "$LUT_SUFFIX" ]; then
+    echo "LUT Suffix: $LUT_SUFFIX"
+fi
 if [ -n "$RESIZE_H" ] && [ -n "$RESIZE_W" ]; then
     echo "Input Resize (H x W): ${RESIZE_H} x ${RESIZE_W}"
 else
