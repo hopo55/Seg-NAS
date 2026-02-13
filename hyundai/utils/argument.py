@@ -31,6 +31,10 @@ def get_args(include_comparison_args=False):
                         help='Label directory name paired with data_dir (e.g., target, target_ori).')
     parser.add_argument('--resize', type=int, default=128,
                         help='Resize dimension as a single integer (e.g., 128).')
+    parser.add_argument('--resize_h', type=int, default=None,
+                        help='Optional resize height. Use with --resize_w.')
+    parser.add_argument('--resize_w', type=int, default=None,
+                        help='Optional resize width. Use with --resize_h.')
     parser.add_argument('--ratios', type=float, default=0.2, 
                         help='Ratios for splitting train and test sets (default: 0.2)')
     # Training Argument

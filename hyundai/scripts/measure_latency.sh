@@ -12,6 +12,9 @@
 #   # GPU devices (auto-detected):
 #   bash hyundai/scripts/measure_latency.sh
 #
+#   # Override input size (must match training RESIZE):
+#   INPUT_SIZE=256 bash hyundai/scripts/measure_latency.sh
+#
 #   # CPU-only edge devices (specify hardware name):
 #   bash hyundai/scripts/measure_latency.sh RaspberryPi5
 #   bash hyundai/scripts/measure_latency.sh Odroid
@@ -23,7 +26,7 @@
 # =============================================================================
 
 # Settings
-INPUT_SIZE=128
+INPUT_SIZE=${INPUT_SIZE:-128}
 WARMUP=200
 REPEAT=300
 OUTPUT_DIR='./hyundai/latency/luts'

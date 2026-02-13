@@ -10,6 +10,7 @@
 # Usage:
 #   # Pareto mode (recommended) - discovers optimal architectures for all hardware
 #   bash hyundai/scripts/train_linas.sh pareto
+#   RESIZE_H=480 RESIZE_W=640 bash hyundai/scripts/train_linas.sh pareto
 #
 #   # Single hardware mode
 #   bash hyundai/scripts/train_linas.sh JetsonOrin
@@ -40,7 +41,10 @@ export MKL_NUM_THREADS=$THREADS_PER_PROC
 # Data Settings
 DATA_DIR=${DATA_DIR:-'./dataset/image'}
 LABEL_DIR_NAME=${LABEL_DIR_NAME:-target}
-RESIZE=128
+# NOTE: Must match LUT input_size for latency-aware optimization.
+RESIZE=${RESIZE:-128}
+RESIZE_H=${RESIZE_H:-}
+RESIZE_W=${RESIZE_W:-}
 TEST_RATIO=0.2
 
 # Training Settings
@@ -113,6 +117,18 @@ PREDICTOR_PATH='./hyundai/latency/predictor.pt'
 # Mode from command line argument (default: pareto)
 MODE_ARG=${1:-pareto}
 
+RESIZE_HW_FLAGS=""
+if [ -n "$RESIZE_H" ] || [ -n "$RESIZE_W" ]; then
+    if [ -z "$RESIZE_H" ] || [ -z "$RESIZE_W" ]; then
+        echo "Error: RESIZE_H and RESIZE_W must be set together."
+        exit 1
+    fi
+    RESIZE_HW_FLAGS="--resize_h $RESIZE_H --resize_w $RESIZE_W"
+    if [ "$RESIZE_H" -ne "$RESIZE" ] || [ "$RESIZE_W" -ne "$RESIZE" ]; then
+        echo "Warning: Non-square resize uses ${RESIZE_H}x${RESIZE_W}, but LUT validation still checks RESIZE=$RESIZE."
+    fi
+fi
+
 # =============================================================================
 # Helper Functions
 # =============================================================================
@@ -122,19 +138,30 @@ PYTHON=${PYTHON:-python3}
 validate_lut_for_search_space() {
     local LUT_PATH=$1
     local SEARCH_SPACE_NAME=$2
+    local EXPECTED_INPUT_SIZE=${3:-}
 
-    $PYTHON - "$LUT_PATH" "$SEARCH_SPACE_NAME" <<'PY'
+    $PYTHON - "$LUT_PATH" "$SEARCH_SPACE_NAME" "$EXPECTED_INPUT_SIZE" <<'PY'
 import json
 import sys
 
 lut_path = sys.argv[1]
 search_space = sys.argv[2]
+expected_input_size = int(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else None
 required = ['Conv3x3', 'Conv5x5', 'Conv7x7', 'DWSep3x3', 'DWSep5x5']
 if search_space == 'industry':
     required += ['EdgeConv', 'DilatedDWSep']
 
 with open(lut_path, 'r') as f:
     lut = json.load(f)
+
+if expected_input_size is not None:
+    lut_input_size = lut.get('input_size')
+    if lut_input_size is not None and int(lut_input_size) != expected_input_size:
+        print(
+            f"Input size mismatch: LUT={lut_input_size}, RESIZE={expected_input_size} "
+            f"({lut_path})"
+        )
+        sys.exit(1)
 
 for layer_name, layer_info in lut.get('layers', {}).items():
     ops = layer_info.get('ops', {})
@@ -199,9 +226,9 @@ run_pareto() {
     for HW in A6000 RTX3090 RTX4090 JetsonOrin RaspberryPi5 Odroid; do
         local LUT_PATH="${LUT_DIR}/lut_${HW,,}.json"
         if [ -f "$LUT_PATH" ]; then
-            if ! validate_lut_for_search_space "$LUT_PATH" "$SEARCH_SPACE"; then
+            if ! validate_lut_for_search_space "$LUT_PATH" "$SEARCH_SPACE" "$RESIZE"; then
                 echo "Error: LUT does not match search space '$SEARCH_SPACE': $LUT_PATH"
-                echo "Please regenerate LUTs with measure_latency.sh"
+                echo "Please regenerate LUTs with measure_latency.sh using INPUT_SIZE=$RESIZE"
                 exit 1
             fi
             ((LUT_COUNT++))
@@ -228,6 +255,7 @@ run_pareto() {
         --data_dir $DATA_DIR \
         --label_dir_name $LABEL_DIR_NAME \
         --resize $RESIZE \
+        $RESIZE_HW_FLAGS \
         --ratios $TEST_RATIO \
         --alpha_lr $ALPHA_LR \
         --train_size $BATCH_SIZE \
@@ -277,9 +305,9 @@ run_single() {
         echo "Please run measure_latency.sh on $HARDWARE first"
         exit 1
     fi
-    if ! validate_lut_for_search_space "$LUT_PATH" "$SEARCH_SPACE"; then
+    if ! validate_lut_for_search_space "$LUT_PATH" "$SEARCH_SPACE" "$RESIZE"; then
         echo "Error: LUT does not match search space '$SEARCH_SPACE': $LUT_PATH"
-        echo "Please regenerate LUTs with measure_latency.sh"
+        echo "Please regenerate LUTs with measure_latency.sh using INPUT_SIZE=$RESIZE"
         exit 1
     fi
 
@@ -296,6 +324,7 @@ run_single() {
         --data_dir $DATA_DIR \
         --label_dir_name $LABEL_DIR_NAME \
         --resize $RESIZE \
+        $RESIZE_HW_FLAGS \
         --ratios $TEST_RATIO \
         --alpha_lr $ALPHA_LR \
         --train_size $BATCH_SIZE \
@@ -328,6 +357,11 @@ echo "Mode: $MODE_ARG"
 echo "Encoder: $ENCODER"
 echo "Search Space: $SEARCH_SPACE"
 echo "Search Backend: $SEARCH_BACKEND"
+if [ -n "$RESIZE_H" ] && [ -n "$RESIZE_W" ]; then
+    echo "Input Resize (H x W): ${RESIZE_H} x ${RESIZE_W}"
+else
+    echo "Input Resize: ${RESIZE} x ${RESIZE}"
+fi
 echo "Seeds: ${SEEDS[*]}"
 echo "=============================================="
 

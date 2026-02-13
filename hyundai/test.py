@@ -5,6 +5,7 @@ from torch.utils.data import DataLoader
 from utils.utils import AverageMeter, get_iou_score, set_device
 from utils.dataloaders import set_transforms, HotDataset
 from utils.car_names import to_english_car_name
+from utils.input_size import get_resize_hw
 
 
 def test_hotstamping(model, test_hot_loader):
@@ -39,7 +40,8 @@ def test_model(args, dataset):
         print(f"Using single GPU: cuda:{args.gpu_idx[0]}")
 
     test_data, test_ind_data = dataset
-    transform = set_transforms(args.resize)
+    resize_h, resize_w = get_resize_hw(args)
+    transform = set_transforms(args.resize, resize_h=resize_h, resize_w=resize_w)
     label_dir_name = getattr(args, 'label_dir_name', 'target')
     source_dir_name = os.path.basename(os.path.normpath(args.data_dir))
 

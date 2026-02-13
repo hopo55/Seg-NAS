@@ -10,6 +10,8 @@ import torch.nn.functional as F
 from torchvision import transforms
 from torch.utils.data import Dataset
 
+from utils.input_size import get_resize_hw
+
 # matplotlib.use('Agg')
 
 
@@ -41,12 +43,24 @@ def _resolve_label_path(label_path):
             return candidate
     return label_path
 
-def set_transforms(resize=128):
+def _resolve_resize_hw(resize=128, resize_h=None, resize_w=None):
+    class _ResizeArgs:
+        pass
+
+    tmp = _ResizeArgs()
+    tmp.resize = resize
+    tmp.resize_h = resize_h
+    tmp.resize_w = resize_w
+    return get_resize_hw(tmp)
+
+
+def set_transforms(resize=128, resize_h=None, resize_w=None):
     """Base transform (no augmentation) — used for val/test."""
+    h, w = _resolve_resize_hw(resize=resize, resize_h=resize_h, resize_w=resize_w)
     transform = transforms.Compose(
         [
             transforms.ToTensor(),
-            transforms.Resize((resize, resize)),
+            transforms.Resize((h, w)),
         ]
     )
     return transform
@@ -62,16 +76,19 @@ class PairedAugmentation:
     attribute).
 
     Args:
-        resize: Target spatial size (square).
+        resize: Target spatial size for legacy square mode.
+        resize_h/resize_w: Optional explicit height/width.
         hflip_p: Probability of horizontal flip.
         vflip_p: Probability of vertical flip.
         rotate_degrees: Max rotation angle in degrees (± uniform).
         color_jitter: Dict of ColorJitter kwargs applied only to the image.
     """
 
-    def __init__(self, resize=128, hflip_p=0.5, vflip_p=0.3,
+    def __init__(self, resize=128, resize_h=None, resize_w=None, hflip_p=0.5, vflip_p=0.3,
                  rotate_degrees=15, color_jitter=None):
-        self.resize = resize
+        self.resize_h, self.resize_w = _resolve_resize_hw(
+            resize=resize, resize_h=resize_h, resize_w=resize_w
+        )
         self.hflip_p = hflip_p
         self.vflip_p = vflip_p
         self.rotate_degrees = rotate_degrees
@@ -88,15 +105,15 @@ class PairedAugmentation:
             label: numpy grayscale image (H, W)
 
         Returns:
-            image_tensor: (3, resize, resize) float32
-            label_tensor: (resize, resize) float32
+            image_tensor: (3, resize_h, resize_w) float32
+            label_tensor: (resize_h, resize_w) float32
         """
         # --- To tensor + resize (both) ---
         to_tensor = transforms.ToTensor()
         image = to_tensor(image)   # (3, H, W)
         label = to_tensor(label)   # (1, H, W)
 
-        resize_fn = transforms.Resize((self.resize, self.resize))
+        resize_fn = transforms.Resize((self.resize_h, self.resize_w))
         image = resize_fn(image)
         label = resize_fn(label)
 
@@ -466,8 +483,9 @@ class TestDataset(Dataset):
         os.makedirs(save_dir, exist_ok=True)
         save_dir = os.path.join(save_dir, file_name)
 
+        resize_h, resize_w = get_resize_hw(self.args)
         image = cv2.imread(self.data[idx])
-        image = cv2.resize(image, (self.args.resize, self.args.resize))
+        image = cv2.resize(image, (resize_w, resize_h))
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         # label_dir = self.data[idx].replace("image", "target")
         # label = cv2.imread(label_dir, cv2.IMREAD_GRAYSCALE)

@@ -6,6 +6,7 @@ import json
 
 import wandb
 from utils.utils import set_device, check_tensor_in_list, get_model_complexity, AverageMeter, get_iou_score
+from utils.input_size import get_resize_hw
 from nas.supernet_dense import SuperNet, OptimizedNetwork
 from nas.train_supernet import (
     train_architecture, train_architecture_with_latency,
@@ -531,7 +532,12 @@ def train_searched_model(args, opt_model, dataset):
             print("Using CPU")
 
     # Measure FLOPs and Parameters for Pareto analysis
-    gflops, params_m = get_model_complexity(opt_model, input_size=(1, 3, args.resize, args.resize), device=device)
+    resize_h, resize_w = get_resize_hw(args)
+    gflops, params_m = get_model_complexity(
+        opt_model,
+        input_size=(1, 3, resize_h, resize_w),
+        device=device,
+    )
     print(f"OptimizedNetwork - FLOPs: {gflops:.4f} GFLOPs, Parameters: {params_m:.4f} M")
     if _wandb_active(args):
         wandb.log({

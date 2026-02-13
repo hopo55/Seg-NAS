@@ -10,6 +10,7 @@ from utils.dataloaders import set_transforms, ImageDataset
 
 from utils.utils import AverageMeter, get_iou_score, measure_inference_time, set_device
 from utils.car_names import to_english_car_name
+from utils.input_size import get_resize_hw
 
 # train warmup
 def train_opt(model, train_loader, loss, optimizer):
@@ -206,9 +207,10 @@ def train_samplenet(
 
     # Measure inference time (paper-style: warmup + multiple runs)
     device = next(model.parameters()).device
+    resize_h, resize_w = get_resize_hw(args)
     mean_time, std_time = measure_inference_time(
         model,
-        input_size=(1, 3, args.resize, args.resize),
+        input_size=(1, 3, resize_h, resize_w),
         device=device,
         num_warmup=50,
         num_runs=100
@@ -230,7 +232,7 @@ def train_samplenet(
             if matching_name is None:
                 continue
 
-            transform = set_transforms(args.resize)
+            transform = set_transforms(args.resize, resize_h=resize_h, resize_w=resize_w)
             test_ind_dataset = ImageDataset(
                 test_ind,
                 transform,
