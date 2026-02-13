@@ -67,8 +67,9 @@ HARDWARE_SPECS = {
 }
 
 # Operation names mapping
-OP_NAMES = ['Conv3x3', 'Conv5x5', 'Conv7x7', 'DWSep3x3', 'DWSep5x5', 'EdgeConv', 'DilatedDWSep']
-WIDTH_MULTS = [0.5, 0.75, 1.0]
+OP_NAMES = ['Conv3x3', 'Conv5x5', 'Conv7x7', 'DWSep3x3', 'DWSep5x5',
+            'EdgeConv', 'DilatedDWSep', 'Conv3x3_SE', 'DWSep3x3_SE']
+WIDTH_MULTS = [0.25, 0.5, 0.75, 1.0, 1.25]
 
 
 class LatencyLUTBuilder:
@@ -130,6 +131,12 @@ class LatencyLUTBuilder:
         elif op_name == 'DilatedDWSep':
             from nas.search_space import DilatedDWSepConvTranspose
             return DilatedDWSepConvTranspose(C_in, C_mid, kernel_size=3, stride=2, dilation=2)
+        elif op_name == 'Conv3x3_SE':
+            from nas.search_space import ConvTransposeSE
+            return ConvTransposeSE(C_in, C_mid, kernel_size=3, stride=2)
+        elif op_name == 'DWSep3x3_SE':
+            from nas.search_space import DWSepConvTransposeSE
+            return DWSepConvTransposeSE(C_in, C_mid, kernel_size=3, stride=2)
         else:
             raise ValueError(f"Unknown operation: {op_name}")
 

@@ -294,6 +294,82 @@ class DepthwiseSeparableConvTranspose2d(nn.Module):
         return dw_flops + pw_flops
 
 
+class SEBlock(nn.Module):
+    """Squeeze-and-Excitation block for channel attention."""
+
+    def __init__(self, channels: int, reduction: int = 4):
+        super().__init__()
+        mid = max(1, channels // reduction)
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.fc1 = nn.Conv2d(channels, mid, 1, bias=False)
+        self.relu = nn.ReLU(inplace=True)
+        self.fc2 = nn.Conv2d(mid, channels, 1, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        w = self.pool(x)
+        w = self.relu(self.fc1(w))
+        w = self.sigmoid(self.fc2(w))
+        return x * w
+
+
+class ConvTransposeSE(nn.Module):
+    """ConvTranspose2d + SE block."""
+
+    def __init__(self, C_in: int, C_out: int, kernel_size: int = 3,
+                 stride: int = 2, bias: bool = False):
+        super().__init__()
+        self.C_in = C_in
+        self.C_out = C_out
+        self.kernel_size = kernel_size
+        padding = _same_padding(kernel_size)
+        self.conv = nn.ConvTranspose2d(
+            C_in, C_out, kernel_size, stride=stride,
+            padding=padding, output_padding=1, bias=bias,
+        )
+        self.se = SEBlock(C_out)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv(x)
+        x = self.se(x)
+        return x
+
+    def get_flops(self, H_out: int, W_out: int) -> int:
+        conv_flops = self.kernel_size ** 2 * self.C_in * self.C_out * H_out * W_out
+        se_flops = 2 * self.C_out * (self.C_out // 4)  # fc1 + fc2 (spatial=1x1)
+        return conv_flops + se_flops
+
+
+class DWSepConvTransposeSE(nn.Module):
+    """Depthwise Separable ConvTranspose + SE block."""
+
+    def __init__(self, C_in: int, C_out: int, kernel_size: int = 3,
+                 stride: int = 2, bias: bool = False):
+        super().__init__()
+        self.C_in = C_in
+        self.C_out = C_out
+        self.kernel_size = kernel_size
+        padding = _same_padding(kernel_size)
+        self.depthwise = nn.ConvTranspose2d(
+            C_in, C_in, kernel_size, stride=stride,
+            padding=padding, output_padding=1, groups=C_in, bias=False,
+        )
+        self.pointwise = nn.Conv2d(C_in, C_out, 1, bias=bias)
+        self.se = SEBlock(C_out)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.depthwise(x)
+        x = self.pointwise(x)
+        x = self.se(x)
+        return x
+
+    def get_flops(self, H_out: int, W_out: int) -> int:
+        dw_flops = self.kernel_size ** 2 * self.C_in * H_out * W_out
+        pw_flops = self.C_in * self.C_out * H_out * W_out
+        se_flops = 2 * self.C_out * (self.C_out // 4)
+        return dw_flops + pw_flops + se_flops
+
+
 # ============================================================================
 # Search Space Definition
 # ============================================================================
@@ -325,6 +401,12 @@ INDUSTRY_OPS = {
     'DilatedDWSep': lambda C_in, C_out, wm: DilatedDWSepConvTranspose(
         C_in, max(1, int(C_out * wm)), kernel_size=3, stride=2, dilation=2
     ),
+    'Conv3x3_SE': lambda C_in, C_out, wm: ConvTransposeSE(
+        C_in, max(1, int(C_out * wm)), kernel_size=3, stride=2
+    ),
+    'DWSep3x3_SE': lambda C_in, C_out, wm: DWSepConvTransposeSE(
+        C_in, max(1, int(C_out * wm)), kernel_size=3, stride=2
+    ),
 }
 
 # Combined search space
@@ -332,11 +414,11 @@ ALL_OPS = {**STANDARD_OPS, **INDUSTRY_OPS}
 
 # Operation names list (ordered)
 STANDARD_OP_NAMES = ['Conv3x3', 'Conv5x5', 'Conv7x7', 'DWSep3x3', 'DWSep5x5']
-INDUSTRY_OP_NAMES = ['EdgeConv', 'DilatedDWSep']
+INDUSTRY_OP_NAMES = ['EdgeConv', 'DilatedDWSep', 'Conv3x3_SE', 'DWSep3x3_SE']
 ALL_OP_NAMES = STANDARD_OP_NAMES + INDUSTRY_OP_NAMES
 
 # Width multipliers
-WIDTH_MULTS = [0.5, 0.75, 1.0]
+WIDTH_MULTS = [0.25, 0.5, 0.75, 1.0, 1.25]
 
 
 def get_operation(op_name: str, C_in: int, C_out: int,
@@ -398,6 +480,15 @@ def get_op_flops(op_name: str, C_in: int, C_out: int,
         dw = 3 * 3 * C_in * H_out * W_out
         pw = C_in * C_mid * H_out * W_out
         return dw + pw
+    elif op_name == 'Conv3x3_SE':
+        conv = 3 * 3 * C_in * C_mid * H_out * W_out
+        se = 2 * C_mid * max(1, C_mid // 4)
+        return conv + se
+    elif op_name == 'DWSep3x3_SE':
+        dw = 3 * 3 * C_in * H_out * W_out
+        pw = C_in * C_mid * H_out * W_out
+        se = 2 * C_mid * max(1, C_mid // 4)
+        return dw + pw + se
     else:
         raise ValueError(f"Unknown operation: {op_name}")
 

@@ -41,6 +41,84 @@ class DepthwiseSeparableConvTranspose2d(nn.Module):
         return x
 
 
+SKIP_FUSION_NAMES = ['add', 'concat', 'attn_gate']
+
+
+class MixedSkip(nn.Module):
+    """Searchable skip-connection fusion with Gumbel-Softmax selection.
+
+    Three candidate fusion modes:
+      - add:       element-wise addition (identity, zero extra params)
+      - concat:    cat(decoder, encoder) followed by 1x1 conv to C_out
+      - attn_gate: sigmoid attention gate — decoder * sigmoid(conv(encoder))
+
+    Args:
+        C_dec: Decoder output channels (from deconv).
+        C_enc: Encoder skip channels (must equal C_dec for add).
+    """
+
+    def __init__(self, C_dec: int, C_enc: int):
+        super().__init__()
+        assert C_dec == C_enc, "Skip fusion requires C_dec == C_enc"
+        self.C = C_dec
+
+        # concat branch: 1x1 conv to project 2C -> C
+        self.concat_proj = nn.Conv2d(C_dec + C_enc, C_dec, 1, bias=False)
+        self.concat_bn = nn.BatchNorm2d(C_dec)
+
+        # attention gate branch
+        self.attn_conv = nn.Conv2d(C_enc, C_dec, 1, bias=False)
+        self.attn_bn = nn.BatchNorm2d(C_dec)
+
+        self.alphas_skip = nn.Parameter(torch.zeros(len(SKIP_FUSION_NAMES)),
+                                        requires_grad=True)
+
+    def clip_alphas(self):
+        return
+
+    def _gumbel_softmax_skip(self, temperature=1.0, hard=False):
+        return F.gumbel_softmax(self.alphas_skip, tau=temperature, hard=hard)
+
+    def forward(self, decoder_feat, encoder_feat, temperature=1.0, hard=False):
+        w = self._gumbel_softmax_skip(temperature=temperature, hard=hard)
+
+        # add
+        out_add = decoder_feat + encoder_feat
+
+        # concat + 1x1
+        out_concat = self.concat_bn(self.concat_proj(
+            torch.cat([decoder_feat, encoder_feat], dim=1)
+        ))
+
+        # attention gate
+        gate = torch.sigmoid(self.attn_bn(self.attn_conv(encoder_feat)))
+        out_attn = decoder_feat * gate
+
+        return w[0] * out_add + w[1] * out_concat + w[2] * out_attn
+
+    def get_max_skip_idx(self):
+        return torch.argmax(self.alphas_skip).item()
+
+    def get_skip_name(self):
+        return SKIP_FUSION_NAMES[self.get_max_skip_idx()]
+
+    def get_skip_flops(self, H, W):
+        """Return FLOPs list for [add, concat, attn_gate]."""
+        C = self.C
+        add_flops = 0
+        concat_flops = (C + C) * C * H * W  # 1x1 conv
+        attn_flops = C * C * H * W           # 1x1 conv
+        return [add_flops, concat_flops, attn_flops]
+
+    def get_sampled_skip_flops(self, H, W, temperature=1.0):
+        flops = self.alphas_skip.new_tensor(self.get_skip_flops(H, W))
+        w = self._gumbel_softmax_skip(temperature=temperature, hard=False)
+        return (w * flops).sum()
+
+    def get_argmax_skip_flops(self, H, W):
+        return self.get_skip_flops(H, W)[self.get_max_skip_idx()]
+
+
 class MixedOp(nn.Module):
     """
     Mixed operation with configurable operation set.
@@ -149,7 +227,7 @@ class MixedOpWithWidth(nn.Module):
             setattr(self, f'bn_{wm_key}', nn.BatchNorm2d(C_mid))
 
             # Projection to restore full channels (for skip connection compatibility)
-            if wm < 1.0:
+            if wm != 1.0:
                 setattr(self, f'proj_{wm_key}', nn.Conv2d(C_mid, C_out, 1, bias=False))
 
         self.relu = nn.ReLU(inplace=True)
@@ -212,7 +290,7 @@ class MixedOpWithWidth(nn.Module):
             op_out = self.relu(op_out)
             op_out = bn(op_out)
 
-            if wm < 1.0:
+            if wm != 1.0:
                 proj = getattr(self, f'proj_{wm_key}')
                 op_out = proj(op_out)
 
@@ -247,7 +325,7 @@ class MixedOpWithWidth(nn.Module):
         """Return the selected projection (or None if width=1.0)"""
         _, width_idx = self.get_max_alpha_idx()
         wm = self.width_mults[width_idx]
-        if wm >= 1.0:
+        if wm == 1.0:
             return None
         wm_key = f"w{int(wm*100)}"
         return getattr(self, f'proj_{wm_key}')
@@ -269,7 +347,7 @@ class MixedOpWithWidth(nn.Module):
             for op_name in self.op_names
         ]
 
-        if wm < 1.0:
+        if wm != 1.0:
             C_mid = max(1, int(self._C_out * wm))
             proj_flops = C_mid * self._C_out * H_out * W_out
             flops_per_op = [f + proj_flops for f in flops_per_op]

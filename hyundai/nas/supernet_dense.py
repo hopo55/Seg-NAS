@@ -4,7 +4,7 @@ from torch import nn
 from torchvision import models as tv_models
 from torchvision.models import DenseNet121_Weights, densenet121
 
-from utils.operations import MixedOp, MixedOpWithWidth
+from utils.operations import MixedOp, MixedOpWithWidth, MixedSkip
 from nas.search_space import STANDARD_OP_NAMES, ALL_OP_NAMES, WIDTH_MULTS
 
 # ---------------------------------------------------------------------------
@@ -201,10 +201,19 @@ class SuperNet(nn.Module):
                 setattr(self, f'deconv{i}',
                         MixedOp(cin, cout, op_names=self.op_names))
 
+        # Searchable skip-connection fusion for deconv1–4
+        # (deconv5 outputs to full resolution with no encoder skip)
+        skip_channels = [c4, c3, c2, c1]  # encoder channels at skip points
+        for i, sc in enumerate(skip_channels, 1):
+            setattr(self, f'skip{i}', MixedSkip(sc, sc))
+
         self.classifier = nn.Conv2d(c_final, n_class, kernel_size=1)
 
     def _deconvs(self):
         return [self.deconv1, self.deconv2, self.deconv3, self.deconv4, self.deconv5]
+
+    def _skips(self):
+        return [self.skip1, self.skip2, self.skip3, self.skip4]
 
     def forward(self, x, temperature=1.0, hard=False):
         output = self.pretrained_net(x)
@@ -216,13 +225,13 @@ class SuperNet(nn.Module):
         x1 = output["x1"]
 
         score = self.deconv1(x5, temperature=temperature, hard=hard)
-        score = score + x4
+        score = self.skip1(score, x4, temperature=temperature, hard=hard)
         score = self.deconv2(score, temperature=temperature, hard=hard)
-        score = score + x3
+        score = self.skip2(score, x3, temperature=temperature, hard=hard)
         score = self.deconv3(score, temperature=temperature, hard=hard)
-        score = score + x2
+        score = self.skip3(score, x2, temperature=temperature, hard=hard)
         score = self.deconv4(score, temperature=temperature, hard=hard)
-        score = score + x1
+        score = self.skip4(score, x1, temperature=temperature, hard=hard)
         score = self.deconv5(score, temperature=temperature, hard=hard)
         score = self.classifier(score)
 
@@ -231,15 +240,20 @@ class SuperNet(nn.Module):
     def clip_alphas(self):
         for d in self._deconvs():
             d.clip_alphas()
+        for s in self._skips():
+            s.clip_alphas()
 
     def get_alphas(self):
         """Return alpha values for logging"""
         if self.search_space in ('extended', 'industry'):
-            return [{'op': d.alphas_op.cpu().detach().numpy().tolist(),
-                      'width': d.alphas_width.cpu().detach().numpy().tolist()}
-                     for d in self._deconvs()]
+            result = [{'op': d.alphas_op.cpu().detach().numpy().tolist(),
+                        'width': d.alphas_width.cpu().detach().numpy().tolist()}
+                       for d in self._deconvs()]
         else:
-            return [d.alphas.cpu().detach().numpy().tolist() for d in self._deconvs()]
+            result = [d.alphas.cpu().detach().numpy().tolist() for d in self._deconvs()]
+        result.append({'skip': [s.alphas_skip.cpu().detach().numpy().tolist()
+                                for s in self._skips()]})
+        return result
 
     def get_alpha_params(self):
         """Return all alpha parameters for optimizer"""
@@ -248,13 +262,22 @@ class SuperNet(nn.Module):
             for d in self._deconvs():
                 params.append(d.alphas_op)
                 params.append(d.alphas_width)
-            return params
         else:
-            return [d.alphas for d in self._deconvs()]
+            params = [d.alphas for d in self._deconvs()]
+        for s in self._skips():
+            params.append(s.alphas_skip)
+        return params
 
     def get_arch_description(self):
         """Return human-readable architecture description"""
-        return [f"deconv{i}: {d.get_op_name()}" for i, d in enumerate(self._deconvs(), 1)]
+        desc = []
+        skips = self._skips()
+        for i, d in enumerate(self._deconvs(), 1):
+            line = f"deconv{i}: {d.get_op_name()}"
+            if i <= len(skips):
+                line += f" | skip{i}: {skips[i-1].get_skip_name()}"
+            desc.append(line)
+        return desc
 
     def get_sampled_flops(self, input_size=128, temperature=1.0):
         """Calculate FLOPs using Gumbel-Softmax sampling (differentiable)."""
@@ -264,6 +287,9 @@ class SuperNet(nn.Module):
         total_flops = 0
         for d, (h, w) in zip(self._deconvs(), sizes):
             total_flops += d.get_sampled_flops(h, w, temperature)
+        # Skip fusion FLOPs (skip1–4 correspond to sizes[0]–sizes[3])
+        for s, (h, w) in zip(self._skips(), sizes[:4]):
+            total_flops += s.get_sampled_skip_flops(h, w, temperature)
         return total_flops / 1e9
 
     def get_argmax_flops(self, input_size=128):
@@ -274,6 +300,8 @@ class SuperNet(nn.Module):
         total_flops = 0
         for d, (h, w) in zip(self._deconvs(), sizes):
             total_flops += d.get_argmax_flops(h, w)
+        for s, (h, w) in zip(self._skips(), sizes[:4]):
+            total_flops += s.get_argmax_skip_flops(h, w)
         return total_flops / 1e9
 
     def get_arch_indices(self):
@@ -362,6 +390,9 @@ class SuperNet(nn.Module):
 
 class OptimizedNetwork(nn.Module):
     """Extract the final architecture from SuperNet based on max alpha selection"""
+
+    SKIP_NAMES = ['add', 'concat', 'attn_gate']
+
     def __init__(self, super_net):
         super(OptimizedNetwork, self).__init__()
 
@@ -393,6 +424,24 @@ class OptimizedNetwork(nn.Module):
             self.proj4 = None
             self.proj5 = None
 
+        # Extract selected skip fusion modes (deconv1–4)
+        self.skip_modes = []
+        for i in range(1, 5):
+            skip_module = getattr(module, f'skip{i}')
+            mode_idx = skip_module.get_max_skip_idx()
+            mode_name = self.SKIP_NAMES[mode_idx]
+            self.skip_modes.append(mode_name)
+            if mode_name == 'concat':
+                setattr(self, f'skip_concat_proj{i}',
+                        copy.deepcopy(skip_module.concat_proj))
+                setattr(self, f'skip_concat_bn{i}',
+                        copy.deepcopy(skip_module.concat_bn))
+            elif mode_name == 'attn_gate':
+                setattr(self, f'skip_attn_conv{i}',
+                        copy.deepcopy(skip_module.attn_conv))
+                setattr(self, f'skip_attn_bn{i}',
+                        copy.deepcopy(skip_module.attn_bn))
+
         self.classifier = copy.deepcopy(module.classifier)
         self.relu = nn.ReLU(inplace=True)
 
@@ -410,6 +459,21 @@ class OptimizedNetwork(nn.Module):
             setattr(self, f'bn{i}', bn)
             setattr(self, f'proj{i}', proj)
 
+    def _apply_skip(self, idx, decoder_feat, encoder_feat):
+        """Apply the selected skip fusion for layer idx (1-based)."""
+        mode = self.skip_modes[idx - 1]
+        if mode == 'add':
+            return decoder_feat + encoder_feat
+        elif mode == 'concat':
+            proj = getattr(self, f'skip_concat_proj{idx}')
+            bn = getattr(self, f'skip_concat_bn{idx}')
+            return bn(proj(torch.cat([decoder_feat, encoder_feat], dim=1)))
+        else:  # attn_gate
+            conv = getattr(self, f'skip_attn_conv{idx}')
+            bn = getattr(self, f'skip_attn_bn{idx}')
+            gate = torch.sigmoid(bn(conv(encoder_feat)))
+            return decoder_feat * gate
+
     def forward(self, x):
         output = self.pretrained_net(x)
 
@@ -425,7 +489,7 @@ class OptimizedNetwork(nn.Module):
         score = self.bn1(score)
         if self.proj1 is not None:
             score = self.proj1(score)
-        score = score + x4
+        score = self._apply_skip(1, score, x4)
 
         # deconv2
         score = self.deconv2(score)
@@ -433,7 +497,7 @@ class OptimizedNetwork(nn.Module):
         score = self.bn2(score)
         if self.proj2 is not None:
             score = self.proj2(score)
-        score = score + x3
+        score = self._apply_skip(2, score, x3)
 
         # deconv3
         score = self.deconv3(score)
@@ -441,7 +505,7 @@ class OptimizedNetwork(nn.Module):
         score = self.bn3(score)
         if self.proj3 is not None:
             score = self.proj3(score)
-        score = score + x2
+        score = self._apply_skip(3, score, x2)
 
         # deconv4
         score = self.deconv4(score)
@@ -449,7 +513,7 @@ class OptimizedNetwork(nn.Module):
         score = self.bn4(score)
         if self.proj4 is not None:
             score = self.proj4(score)
-        score = score + x1
+        score = self._apply_skip(4, score, x1)
 
         # deconv5
         score = self.deconv5(score)
