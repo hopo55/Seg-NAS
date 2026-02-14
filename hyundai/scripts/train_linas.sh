@@ -138,7 +138,20 @@ PYTHON=${PYTHON:-python3}
 
 resolve_lut_path() {
     local hardware=$1
-    local preferred="${LUT_DIR}/lut_${hardware,,}${LUT_SUFFIX}.json"
+    local hardware_key="${hardware,,}"
+
+    # Naming convention:
+    # - default dataset: lut_jetsonorin.json
+    # - original dataset (LUT_SUFFIX=_original): lut_orin_original.json
+    if [ "$hardware_key" = "jetsonorin" ]; then
+        if [ "$LUT_SUFFIX" = "_original" ]; then
+            hardware_key="orin"
+        else
+            hardware_key="jetsonorin"
+        fi
+    fi
+
+    local preferred="${LUT_DIR}/lut_${hardware_key}${LUT_SUFFIX}.json"
 
     if [ -f "$preferred" ]; then
         echo "$preferred"
@@ -146,11 +159,34 @@ resolve_lut_path() {
     fi
 
     if [ -n "$LUT_SUFFIX" ]; then
-        local fallback="${LUT_DIR}/lut_${hardware,,}.json"
+        local fallback="${LUT_DIR}/lut_${hardware_key}.json"
         if [ -f "$fallback" ]; then
             echo "Warning: missing suffixed LUT '$preferred', falling back to '$fallback'" >&2
             echo "$fallback"
             return 0
+        fi
+    fi
+
+    # Backward compatibility for alternate JetsonOrin LUT naming.
+    if [ "${hardware,,}" = "jetsonorin" ]; then
+        local legacy_key="orin"
+        if [ "$hardware_key" = "orin" ]; then
+            legacy_key="jetsonorin"
+        fi
+        local legacy_preferred="${LUT_DIR}/lut_${legacy_key}${LUT_SUFFIX}.json"
+        if [ -f "$legacy_preferred" ]; then
+            echo "Warning: using legacy JetsonOrin LUT name '$legacy_preferred'" >&2
+            echo "$legacy_preferred"
+            return 0
+        fi
+
+        if [ -n "$LUT_SUFFIX" ]; then
+            local legacy_fallback="${LUT_DIR}/lut_${legacy_key}.json"
+            if [ -f "$legacy_fallback" ]; then
+                echo "Warning: using legacy JetsonOrin LUT name '$legacy_fallback'" >&2
+                echo "$legacy_fallback"
+                return 0
+            fi
         fi
     fi
 
