@@ -140,15 +140,11 @@ resolve_lut_path() {
     local hardware=$1
     local hardware_key="${hardware,,}"
 
-    # Naming convention:
-    # - default dataset: lut_jetsonorin.json
+    # Naming convention for Jetson Orin:
+    # - default dataset: lut_orin.json
     # - original dataset (LUT_SUFFIX=_original): lut_orin_original.json
     if [ "$hardware_key" = "jetsonorin" ]; then
-        if [ "$LUT_SUFFIX" = "_original" ]; then
-            hardware_key="orin"
-        else
-            hardware_key="jetsonorin"
-        fi
+        hardware_key="orin"
     fi
 
     local preferred="${LUT_DIR}/lut_${hardware_key}${LUT_SUFFIX}.json"
