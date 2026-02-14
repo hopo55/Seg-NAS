@@ -23,6 +23,9 @@
 #   bash hyundai/scripts/measure_latency_original.sh RaspberryPi5
 #   bash hyundai/scripts/measure_latency_original.sh Odroid
 #
+#   # Force hardware name on Jetson Orin (manual override):
+#   bash hyundai/scripts/measure_latency.sh JetsonOrin
+#
 #   # Specify encoder:
 #   ENCODER=resnet50 bash hyundai/scripts/measure_latency_original.sh
 #

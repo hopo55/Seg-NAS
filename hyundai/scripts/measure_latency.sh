@@ -19,6 +19,9 @@
 #   bash hyundai/scripts/measure_latency.sh RaspberryPi5
 #   bash hyundai/scripts/measure_latency.sh Odroid
 #
+#   # Force hardware name on Jetson Orin (manual override):
+#   bash hyundai/scripts/measure_latency.sh JetsonOrin
+#
 # Supported hardware:
 #   GPU:  A6000, RTX3090, RTX4090
 #   Edge: JetsonOrin (CUDA), RaspberryPi5 (CPU), Odroid (CPU)
@@ -32,7 +35,7 @@ REPEAT=300
 ENCODER=${ENCODER:-densenet121}
 OUTPUT_DIR='./hyundai/latency/luts'
 
-# Optional: hardware name override (for CPU-only devices)
+# Optional: hardware name override (manual)
 HARDWARE_NAME=${1:-}
 
 PYTHON=${PYTHON:-python3}
