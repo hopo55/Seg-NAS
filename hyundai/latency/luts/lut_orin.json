@@ -1,5 +1,5 @@
 {
-  "hardware": "JetsonOrin",
+  "hardware": "Orin",
   "input_size": 128,
   "warmup": 200,
   "repeat": 300,
