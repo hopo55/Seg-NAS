@@ -13,7 +13,8 @@ from utils.car_names import to_english_car_name
 from utils.input_size import get_resize_hw
 
 # train warmup
-def train_opt(model, train_loader, loss, optimizer):
+def train_opt(model, train_loader, loss, optimizer,
+              use_amp=False, scaler=None, clip_grad=None):
     model.train()
     train_loss = AverageMeter()
     train_iou = AverageMeter()
@@ -23,16 +24,32 @@ def train_opt(model, train_loader, loss, optimizer):
         data, labels = data.to(device), labels.to(device)
         batch_size = data.size(0)
         optimizer.zero_grad()
-        outputs = model(data)
-        loss_value = loss(outputs, labels)
-        train_loss.update(loss_value.item(), batch_size)
-        loss_value.backward()
 
-        # get iou with smp
+        if use_amp:
+            with torch.cuda.amp.autocast():
+                outputs = model(data)
+                loss_value = loss(outputs, labels)
+        else:
+            outputs = model(data)
+            loss_value = loss(outputs, labels)
+
+        train_loss.update(loss_value.item(), batch_size)
+
+        if scaler is not None:
+            scaler.scale(loss_value).backward()
+            if clip_grad and clip_grad > 0:
+                scaler.unscale_(optimizer)
+                nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss_value.backward()
+            if clip_grad and clip_grad > 0:
+                nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
+            optimizer.step()
+
         iou_score = get_iou_score(outputs, labels)
         train_iou.update(iou_score, batch_size)
-
-        optimizer.step()
 
     return train_loss.avg, train_iou.avg
 
@@ -126,8 +143,31 @@ def train_samplenet(
     best_model_state = None
     best_val_iou = -float('inf')
 
+    # Proposal 7: Retraining enhancements
+    use_amp = getattr(args, 'retrain_use_amp', False)
+    scaler = torch.cuda.amp.GradScaler() if use_amp else None
+    clip_grad = float(getattr(args, 'retrain_clip_grad', 0.0)) or None
+
+    scheduler = None
+    if getattr(args, 'retrain_use_cosine_lr', False):
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=args.epochs, eta_min=1e-6
+        )
+
     # Track retrain time
     retrain_start_time = time.time()
+
+    show_main = (not hasattr(args, 'rank')) or args.rank == 0
+    if show_main:
+        enhancements = []
+        if use_amp:
+            enhancements.append("AMP")
+        if clip_grad:
+            enhancements.append(f"grad_clip={clip_grad}")
+        if scheduler:
+            enhancements.append(f"CosineAnnealingLR(T_max={args.epochs})")
+        if enhancements:
+            print(f"SampleNet enhancements: {', '.join(enhancements)}")
 
     print("SampleNet training has started...")
     show_pbar = (not hasattr(args, 'rank')) or args.rank == 0
@@ -150,8 +190,12 @@ def train_samplenet(
             dynamic_ncols=True,
         ) if show_pbar else val_loader
 
-        train_loss, train_iou = train_opt(model, train_iter, loss, optimizer)
+        train_loss, train_iou = train_opt(model, train_iter, loss, optimizer,
+                                           use_amp=use_amp, scaler=scaler, clip_grad=clip_grad)
         val_iou = test_opt(model, test_iter)
+
+        if scheduler is not None:
+            scheduler.step()
 
         if val_iou > best_val_iou:
             best_val_iou = val_iou  # Update the best IoU

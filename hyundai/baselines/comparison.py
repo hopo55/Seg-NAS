@@ -77,7 +77,16 @@ def train_single_baseline(args, model_name, dataset):
 
     # Create model
     model = get_baseline_model(model_name, n_class=2)
-    if len(args.gpu_idx) >= 2:
+    num_gpus = len(args.gpu_idx)
+    use_data_parallel = num_gpus >= 2
+    if use_data_parallel and args.train_size // num_gpus < 2:
+        print(
+            f"Warning: train_size={args.train_size} with {num_gpus} GPUs gives "
+            f"<2 samples/GPU. Falling back to single GPU to avoid BatchNorm errors."
+        )
+        use_data_parallel = False
+
+    if use_data_parallel:
         model = torch.nn.DataParallel(model, device_ids=args.gpu_idx).to(device)
     else:
         model.to(device)
@@ -92,7 +101,15 @@ def train_single_baseline(args, model_name, dataset):
     # Prepare data
     train_dataset, val_dataset, test_dataset, test_ind_data = dataset
     train_dataset = ConcatDataset([train_dataset, val_dataset])
-    train_loader = DataLoader(train_dataset, batch_size=args.train_size, shuffle=True)
+    # DeepLabV3+ can fail with DataParallel when the last micro-batch per replica
+    # becomes size 1 due to BatchNorm in ASPP pooling branch.
+    drop_last = use_data_parallel and len(train_dataset) >= args.train_size
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.train_size,
+        shuffle=True,
+        drop_last=drop_last,
+    )
     test_loader = DataLoader(test_dataset, batch_size=args.test_size, shuffle=False)
 
     # Loss and optimizer

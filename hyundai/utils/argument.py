@@ -154,6 +154,26 @@ def get_args(include_comparison_args=False):
                         choices=['ce', 'dice_boundary'],
                         help='Loss function: ce (CrossEntropy) or dice_boundary (CE+Dice+Boundary)')
 
+    # Accuracy improvements
+    parser.add_argument('--entropy_lambda', type=float, default=0.0,
+                        help='Alpha entropy regularization weight (0=disabled, try 0.1)')
+    parser.add_argument('--use_self_distillation', action='store_true',
+                        help='Enable EMA-based self-distillation during weight training')
+    parser.add_argument('--ema_decay', type=float, default=0.999,
+                        help='EMA decay rate for self-distillation teacher (default: 0.999)')
+    parser.add_argument('--sd_alpha', type=float, default=0.3,
+                        help='Self-distillation KL loss weight (default: 0.3)')
+    parser.add_argument('--use_calr', action='store_true',
+                        help='Enable subnet-aware dynamic LR during CALOFA sandwich training')
+    parser.add_argument('--calr_scale', type=float, default=0.5,
+                        help='CaLR scale: lr_factor = 1 + scale * (1 - width_ratio). Default: 0.5')
+    parser.add_argument('--retrain_use_cosine_lr', action='store_true',
+                        help='Use cosine annealing LR scheduler during subnet retraining')
+    parser.add_argument('--retrain_use_amp', action='store_true',
+                        help='Enable AMP during subnet retraining')
+    parser.add_argument('--retrain_clip_grad', type=float, default=0.0,
+                        help='Gradient clipping for subnet retraining (0=disabled, try 5.0)')
+
     # Memory optimization
     parser.add_argument('--use_amp', action='store_true',
                         help='Enable FP16 Automatic Mixed Precision training')

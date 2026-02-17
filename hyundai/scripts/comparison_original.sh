@@ -13,12 +13,20 @@
 # This script reuses comparison.sh and only switches dataset pairing:
 #   DATA_DIR=./dataset/original
 #   LABEL_DIR_NAME=target_ori
+#   AP_DATASET_DIR=./dataset/original
+#   RESIZE_W=640
+#   RESIZE_H=480
 # =============================================================================
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RESIZE_W=${RESIZE_W:-640}
+RESIZE_H=${RESIZE_H:-480}
 
 DATA_DIR=./dataset/original \
 LABEL_DIR_NAME=target_ori \
+AP_DATASET_DIR=./dataset/original \
+RESIZE_W=$RESIZE_W \
+RESIZE_H=$RESIZE_H \
 bash "${SCRIPT_DIR}/comparison.sh" "$@"

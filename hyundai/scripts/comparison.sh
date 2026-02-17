@@ -28,17 +28,22 @@ GPU_IDX=(0 1)
 # Data settings
 DATA_DIR=${DATA_DIR:-'./dataset/image'}
 LABEL_DIR_NAME=${LABEL_DIR_NAME:-target}
-RESIZE=128
+RESIZE=${RESIZE:-128}
+RESIZE_W=${RESIZE_W:-}
+RESIZE_H=${RESIZE_H:-}
 TEST_RATIO=0.2
 
 # Training settings
-BATCH_SIZE=64
+BATCH_SIZE=16
 OPT_LR=0.001
 EPOCHS=1
 
 # Baseline models to compare
 # BASELINE_MODELS=(unet deeplabv3plus autopatch realtimeseg)
-BASELINE_MODELS=(autopatch)
+BASELINE_MODELS=(deeplabv3plus)
+# NOTE:
+#   If BASELINE_MODELS is exactly (autopatch), this script redirects to
+#   AutoPatch official reproduction pipeline for consistency.
 
 PYTHON=${PYTHON:-python3}
 MODE_ARG=${1:-baseline}
@@ -62,17 +67,27 @@ AP_BATCH_SIZE=${AP_BATCH_SIZE:-391}
 AP_IMG_SIZE=${AP_IMG_SIZE:-224}
 AP_CATEGORY=${AP_CATEGORY:-carpet}
 AP_TEST_SET_SEARCH=${AP_TEST_SET_SEARCH:-False}
-AP_DATASET_DIR=${AP_DATASET_DIR:-./MVTec}
+AP_DATASET_DIR=${AP_DATASET_DIR:-$DATA_DIR}
 AP_DB_URL=${AP_DB_URL:-sqlite:///hyundai/baselines/autopatch_official/studies.db}
 AP_ACCELERATOR=${AP_ACCELERATOR:-auto}
 AP_VISIBLE_GPUS=${AP_VISIBLE_GPUS:-$VISIBLE_GPUS}
 
 run_baseline_comparison() {
     local SEED=$1
+    local resize_args=(--resize "$RESIZE")
+    if [ -n "$RESIZE_W" ] && [ -n "$RESIZE_H" ]; then
+        resize_args+=(--resize_w "$RESIZE_W" --resize_h "$RESIZE_H")
+    fi
+
     echo "========================================"
     echo "BASELINE COMPARISON"
     echo "  Seed: $SEED"
     echo "  Models: ${BASELINE_MODELS[*]}"
+    if [ -n "$RESIZE_W" ] && [ -n "$RESIZE_H" ]; then
+        echo "  Resize: ${RESIZE_W}x${RESIZE_H}"
+    else
+        echo "  Resize: ${RESIZE}x${RESIZE}"
+    fi
     echo "========================================"
 
     CUDA_VISIBLE_DEVICES=$VISIBLE_GPUS $PYTHON hyundai/comparison.py \
@@ -81,7 +96,7 @@ run_baseline_comparison() {
         --data "$DATA" \
         --data_dir "$DATA_DIR" \
         --label_dir_name "$LABEL_DIR_NAME" \
-        --resize "$RESIZE" \
+        "${resize_args[@]}" \
         --ratios "$TEST_RATIO" \
         --gpu_idx "${GPU_IDX[@]}" \
         --train_size "$BATCH_SIZE" \
@@ -115,7 +130,17 @@ run_autopatch_official() {
         --db_url "$AP_DB_URL"
 }
 
-if [ "$MODE_ARG" = "baseline" ]; then
+is_only_autopatch_baseline() {
+    [ "${#BASELINE_MODELS[@]}" -eq 1 ] && [ "${BASELINE_MODELS[0]}" = "autopatch" ]
+}
+
+is_mvtec_layout() {
+    [ -d "${AP_DATASET_DIR}/${AP_CATEGORY}/train/good" ] && \
+    [ -d "${AP_DATASET_DIR}/${AP_CATEGORY}/test/good" ] && \
+    [ -d "${AP_DATASET_DIR}/${AP_CATEGORY}/ground_truth" ]
+}
+
+run_baseline_with_seed_arg() {
     if [ "$SEED_ARG" = "all" ]; then
         for SEED in "${SEEDS[@]}"; do
             run_baseline_comparison "$SEED"
@@ -123,7 +148,31 @@ if [ "$MODE_ARG" = "baseline" ]; then
     else
         run_baseline_comparison "$SEED_ARG"
     fi
+}
+
+if [ "$MODE_ARG" = "baseline" ]; then
+    if is_only_autopatch_baseline; then
+        if is_mvtec_layout; then
+            echo "BASELINE_MODELS=(autopatch) detected."
+            echo "Redirecting to AUTOPATCH OFFICIAL REPRODUCTION pipeline."
+            run_autopatch_official
+        else
+            echo "BASELINE_MODELS=(autopatch) detected."
+            echo "AP_DATASET_DIR does not match MVTec layout; running baseline autopatch instead."
+            run_baseline_with_seed_arg
+        fi
+    else
+        run_baseline_with_seed_arg
+    fi
 elif [ "$MODE_ARG" = "autopatch_official" ]; then
+    if ! is_mvtec_layout; then
+        echo "Error: AP_DATASET_DIR does not match MVTec layout."
+        echo "Expected:"
+        echo "  ${AP_DATASET_DIR}/${AP_CATEGORY}/train/good"
+        echo "  ${AP_DATASET_DIR}/${AP_CATEGORY}/test/good"
+        echo "  ${AP_DATASET_DIR}/${AP_CATEGORY}/ground_truth"
+        exit 1
+    fi
     run_autopatch_official
 else
     echo "Error: unknown mode '$MODE_ARG'"

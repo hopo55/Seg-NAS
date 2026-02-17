@@ -14,9 +14,12 @@ def set_seed(seed):
     torch.cuda.manual_seed(seed)  # PyTorch의 GPU 시드 고정
     torch.cuda.manual_seed_all(seed)  # 여러 GPU 사용 시 고정
     
-    # cuDNN의 비결정적 결과 방지를 위해 다음 두 옵션 설정
+    # cuDNN 설정: deterministic + benchmark 비활성화
+    # AMP(FP16) + 비정형 해상도(480x640)에서 cuDNN 알고리즘 호환 문제 방지를 위해
+    # cuDNN 자체를 비활성화하고 PyTorch 기본 conv 구현 사용
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.enabled = False
 
 def set_device(gpu_idx, local_rank=None):
     """

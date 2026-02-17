@@ -50,6 +50,8 @@ class Model(LightningModule):
             num_starting_points=num_starting_points,
             mapper=self.mapper,
         )
+        self._val_outputs = []
+        self._test_outputs = []
 
     def _patchify(self, x: torch.Tensor) -> torch.Tensor:
         # Get output from each extraction block
@@ -128,11 +130,21 @@ class Model(LightningModule):
         self.latency(default_timer() - start_time)
         return y_hat, y, x_type
 
+    def on_validation_epoch_start(self) -> None:
+        self._val_outputs = []
+
+    def on_test_epoch_start(self) -> None:
+        self._test_outputs = []
+
     def validation_step(self, batch, _) -> Tuple[torch.Tensor, torch.Tensor]:
-        return self._inference_step(batch)
+        output = self._inference_step(batch)
+        self._val_outputs.append(output)
+        return output
 
     def test_step(self, batch, _) -> Tuple[torch.Tensor, torch.Tensor]:
-        return self._inference_step(batch)
+        output = self._inference_step(batch)
+        self._test_outputs.append(output)
+        return output
 
     def _compute_metrics(
         self, outputs: list
@@ -181,11 +193,15 @@ class Model(LightningModule):
             (weighted_recall[1:] - weighted_recall[:-1]) * weighted_precision[:-1]
         ).item()
 
-    def validation_epoch_end(self, outputs) -> None:
-        self._compute_metrics(outputs)
+    def on_validation_epoch_end(self) -> None:
+        if self._val_outputs:
+            self._compute_metrics(self._val_outputs)
+            self._val_outputs = []
 
-    def test_epoch_end(self, outputs) -> None:
-        self._compute_metrics(outputs)
+    def on_test_epoch_end(self) -> None:
+        if self._test_outputs:
+            self._compute_metrics(self._test_outputs)
+            self._test_outputs = []
 
     def configure_optimizers(self):
         pass

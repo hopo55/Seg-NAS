@@ -109,6 +109,17 @@ EVO_MUTATION_PROB=0.1
 EVO_CROSSOVER_PROB=0.5
 REPORT_HV_IGD=true
 
+# Accuracy improvements
+ENTROPY_LAMBDA=0.1              # Proposal 4: Alpha entropy regularization (0=disabled)
+USE_SELF_DISTILLATION=true      # Proposal 5: EMA self-distillation
+EMA_DECAY=0.999
+SD_ALPHA=0.3
+USE_CALR=true                   # Proposal 6: Subnet-aware dynamic LR
+CALR_SCALE=0.5
+RETRAIN_USE_COSINE_LR=true      # Proposal 7: Cosine LR for retraining
+RETRAIN_USE_AMP=true            # Proposal 7: AMP for retraining
+RETRAIN_CLIP_GRAD=5.0           # Proposal 7: Gradient clipping for retraining
+
 # Pareto search settings
 PARETO_SAMPLES=1000     # Number of architectures to sample
 # PARETO_EVAL_SUBSET=100  # Number to actually evaluate
@@ -293,6 +304,29 @@ build_calofa_flags() {
     echo "$flags"
 }
 
+build_accuracy_flags() {
+    local flags=""
+    if [ "$(echo "$ENTROPY_LAMBDA > 0" | bc)" -eq 1 ] 2>/dev/null; then
+        flags="$flags --entropy_lambda $ENTROPY_LAMBDA"
+    fi
+    if [ "$USE_SELF_DISTILLATION" = "true" ]; then
+        flags="$flags --use_self_distillation --ema_decay $EMA_DECAY --sd_alpha $SD_ALPHA"
+    fi
+    if [ "$USE_CALR" = "true" ]; then
+        flags="$flags --use_calr --calr_scale $CALR_SCALE"
+    fi
+    if [ "$RETRAIN_USE_COSINE_LR" = "true" ]; then
+        flags="$flags --retrain_use_cosine_lr"
+    fi
+    if [ "$RETRAIN_USE_AMP" = "true" ]; then
+        flags="$flags --retrain_use_amp"
+    fi
+    if [ "$(echo "$RETRAIN_CLIP_GRAD > 0" | bc)" -eq 1 ] 2>/dev/null; then
+        flags="$flags --retrain_clip_grad $RETRAIN_CLIP_GRAD"
+    fi
+    echo "$flags"
+}
+
 build_hardware_targets_json() {
     local json="{"
     local first=true
@@ -314,6 +348,7 @@ run_pareto() {
     local PS_FLAGS=$(build_ps_flags)
     local CALOFA_FLAGS=$(build_calofa_flags)
     local MEMORY_FLAGS=$(build_memory_flags)
+    local ACCURACY_FLAGS=$(build_accuracy_flags)
 
     echo "========================================"
     echo "PARETO-BASED NAS (RF-DETR Style)"
@@ -386,7 +421,8 @@ run_pareto() {
         --loss_type $LOSS_TYPE \
         $CALOFA_FLAGS \
         $PS_FLAGS \
-        $MEMORY_FLAGS
+        $MEMORY_FLAGS \
+        $ACCURACY_FLAGS
 }
 
 run_single() {
@@ -397,6 +433,7 @@ run_single() {
     local PS_FLAGS=$(build_ps_flags)
     local CALOFA_FLAGS=$(build_calofa_flags)
     local MEMORY_FLAGS=$(build_memory_flags)
+    local ACCURACY_FLAGS=$(build_accuracy_flags)
 
     if ! LUT_PATH=$(resolve_lut_path "$HARDWARE"); then
         echo "Error: LUT file not found for '$HARDWARE' in $LUT_DIR (suffix: '$LUT_SUFFIX')"
@@ -455,7 +492,8 @@ run_single() {
         --loss_type $LOSS_TYPE \
         $CALOFA_FLAGS \
         $PS_FLAGS \
-        $MEMORY_FLAGS
+        $MEMORY_FLAGS \
+        $ACCURACY_FLAGS
 }
 
 # =============================================================================

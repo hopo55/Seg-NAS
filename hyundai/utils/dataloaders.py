@@ -3,6 +3,7 @@ import cv2
 import random
 import matplotlib
 import numpy as np
+import warnings
 from sklearn.model_selection import train_test_split
 
 import torch
@@ -189,6 +190,14 @@ def load_folder_model(data_dir, ratios, names, train_val_split=0.8):
         random.shuffle(folders)
         total = len(folders)
         train_end = int(total * (1 - ratios))
+        if total > 0 and train_end <= 0:
+            # For tiny splits (e.g., 1 folder with test_ratio=0.2), keep at least
+            # one sample in train/val so DataLoader does not receive an empty set.
+            warnings.warn(
+                "Dataset split would create an empty train set; forcing at least one "
+                "folder into train/val. Consider adding more data or lowering test_ratio."
+            )
+            train_end = 1
 
         train_and_valid = folders[:train_end]
         test_folders.extend(folders[train_end:])

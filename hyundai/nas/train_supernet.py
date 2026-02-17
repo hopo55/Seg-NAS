@@ -10,6 +10,30 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass
 
 from utils.utils import AverageMeter, get_iou_score
+import copy
+
+
+class EMATeacher:
+    """Exponential Moving Average teacher for self-distillation (SD-DARTS)."""
+
+    def __init__(self, model, decay=0.999):
+        self.decay = decay
+        module = model.module if hasattr(model, 'module') else model
+        self.shadow = copy.deepcopy(module)
+        self.shadow.eval()
+        for p in self.shadow.parameters():
+            p.requires_grad_(False)
+
+    @torch.no_grad()
+    def update(self, model):
+        module = model.module if hasattr(model, 'module') else model
+        for ema_p, model_p in zip(self.shadow.parameters(), module.parameters()):
+            ema_p.mul_(self.decay).add_(model_p.detach(), alpha=1 - self.decay)
+
+    @torch.no_grad()
+    def forward(self, x, temperature=1.0, hard=False):
+        self.shadow.eval()
+        return self.shadow(x, temperature=temperature, hard=hard)
 
 
 def _amp_autocast(use_amp):
@@ -111,6 +135,35 @@ def compute_alpha_entropy(model):
             entropies.append(entropy.item())
 
     return sum(entropies) / len(entropies) if entropies else 0.0
+
+
+def compute_alpha_entropy_differentiable(model):
+    """Differentiable entropy of alpha parameters (for use as a loss term)."""
+    device = next(model.parameters()).device
+    total_entropy = torch.tensor(0.0, device=device)
+    count = 0
+    module = model.module if hasattr(model, 'module') else model
+
+    for name, m in module.named_modules():
+        if hasattr(m, 'alphas_op'):
+            op_probs = torch.softmax(m.alphas_op, dim=0)
+            total_entropy = total_entropy - (op_probs * torch.log(op_probs + 1e-8)).sum()
+            count += 1
+            width_probs = torch.softmax(m.alphas_width, dim=0)
+            total_entropy = total_entropy - (width_probs * torch.log(width_probs + 1e-8)).sum()
+            count += 1
+        elif hasattr(m, 'alphas'):
+            probs = torch.softmax(m.alphas, dim=0)
+            total_entropy = total_entropy - (probs * torch.log(probs + 1e-8)).sum()
+            count += 1
+
+    return total_entropy / max(count, 1)
+
+
+def _get_calr_factor(width_idx, width_mults, calr_scale):
+    """CaLR: larger width → factor=1.0, smaller width → factor > 1.0."""
+    width_ratio = width_mults[width_idx] / max(width_mults)
+    return 1.0 + calr_scale * (1.0 - width_ratio)
 
 
 def _is_main_process(args) -> bool:
@@ -575,6 +628,11 @@ def train_weight_alpha_with_latency(
             current_latency = argmax_flops  # Use FLOPs as proxy
 
         total_loss = ce_loss + latency_penalty
+
+        # Proposal 4: Alpha entropy regularization
+        entropy_lambda = float(getattr(args, 'entropy_lambda', 0.0))
+        if entropy_lambda > 0:
+            total_loss = total_loss + entropy_lambda * compute_alpha_entropy_differentiable(model)
 
         train_a_loss.update(ce_loss.item(), batch_size)
         train_latency.update(current_latency, batch_size)
@@ -1094,6 +1152,7 @@ def train_weight_alpha_with_latency_ps(
     phase_config: Optional[PSPhaseConfig] = None,
     use_amp=False,
     scaler=None,
+    ema_teacher=None,
 ):
     """Progressive Shrinking variant: weight training includes KD loss from teacher."""
     current_temp = calculate_gumbel_temperature(epoch, args.epochs)
@@ -1138,6 +1197,17 @@ def train_weight_alpha_with_latency_ps(
             num_subnets = len(sandwich_indices)
             is_ddp = isinstance(model, torch.nn.parallel.DistributedDataParallel)
 
+            # Proposal 5: EMA teacher output (computed once per batch)
+            ema_output = None
+            sd_alpha_val = float(getattr(args, 'sd_alpha', 0.3))
+            if ema_teacher is not None:
+                with torch.no_grad(), _amp_autocast(use_amp):
+                    ema_output = ema_teacher.forward(data, temperature=current_temp, hard=hard_mode)
+
+            # Proposal 6: CaLR settings
+            use_calr = getattr(args, 'use_calr', False)
+            calr_scale = float(getattr(args, 'calr_scale', 0.5))
+
             for idx_pos, width_idx in enumerate(sandwich_indices):
                 module.set_active_widths([int(width_idx)])
                 is_last = (idx_pos == num_subnets - 1)
@@ -1162,11 +1232,29 @@ def train_weight_alpha_with_latency_ps(
                             ) * (kd_temp_eff ** 2)
                             subnet_loss = ((1 - kd_alpha_eff) * task_loss_sub + kd_alpha_eff * kd_loss) / num_subnets
 
+                        # Proposal 5: Self-distillation from EMA teacher
+                        if ema_output is not None:
+                            sd_loss = F.kl_div(
+                                F.log_softmax(outputs_sub / kd_temp_eff, dim=1),
+                                F.softmax(ema_output / kd_temp_eff, dim=1),
+                                reduction='batchmean'
+                            ) * (kd_temp_eff ** 2)
+                            subnet_loss = subnet_loss + sd_alpha_val * sd_loss / num_subnets
+
+                    # Proposal 6: CaLR - scale loss by width-dependent factor
+                    if use_calr:
+                        calr_factor = _get_calr_factor(width_idx, module.width_mults, calr_scale)
+                        subnet_loss = subnet_loss * calr_factor
+
                     _amp_backward(scaler, subnet_loss)
 
             module.set_active_widths(original_active)
             # Gradients already accumulated; skip total_weight_loss.backward() below
             _amp_step(scaler, optimizer_weight)
+
+            # Proposal 5: Update EMA teacher after weight step
+            if ema_teacher is not None:
+                ema_teacher.update(model)
             train_loader_iter.set_postfix(
                 loss=f"{train_w_loss.avg:.4f}",
                 iou=f"{train_w_iou.avg:.4f}",
@@ -1277,6 +1365,12 @@ def train_weight_alpha_with_latency_ps(
                 current_latency_val = argmax_flops
 
             total_loss = ce_loss + latency_penalty
+
+            # Proposal 4: Alpha entropy regularization
+            entropy_lambda = float(getattr(args, 'entropy_lambda', 0.0))
+            if entropy_lambda > 0:
+                total_loss = total_loss + entropy_lambda * compute_alpha_entropy_differentiable(model)
+
             train_a_loss.update(ce_loss.item(), batch_size)
             train_latency.update(current_latency_val, batch_size)
             train_a_iou.update(get_iou_score(outputs, labels), batch_size)
@@ -1317,6 +1411,7 @@ def train_architecture_with_latency_ps(
     latency_lut=None,
     hardware_targets: Optional[Dict[str, float]] = None,
     ps_phases: Optional[List[PSPhaseConfig]] = None,
+    ema_teacher=None,
 ):
     """Train architecture with Progressive Shrinking + latency-aware optimization."""
     train_dataset, val_dataset, test_dataset, _ = dataset
@@ -1440,6 +1535,7 @@ def train_architecture_with_latency_ps(
                     phase_config=phase,
                     use_amp=use_amp,
                     scaler=scaler,
+                    ema_teacher=ema_teacher,
                 )
             )
 

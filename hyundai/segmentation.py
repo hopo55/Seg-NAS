@@ -11,11 +11,36 @@ from nas.supernet_dense import SuperNet, OptimizedNetwork
 from nas.train_supernet import (
     train_architecture, train_architecture_with_latency,
     train_architecture_with_latency_ps, PSPhaseConfig,
+    EMATeacher,
 )
 from nas.train_samplenet import train_samplenet
 from nas.pareto_search import ParetoSearcher, print_pareto_summary
 from nas.search_space import STANDARD_OP_NAMES, ALL_OP_NAMES, WIDTH_MULTS, calculate_search_space_size
 from utils.losses import get_loss_function
+
+
+def _resolve_lut_path(lut_dir: Path, hardware: str) -> Path | None:
+    """Resolve LUT file path with suffix-aware fallback.
+
+    Tries exact match first (lut_{hw}.json), then glob for any suffix
+    (lut_{hw}*.json) to support naming like lut_a6000_original.json.
+    Special-cases JetsonOrin → orin key.
+    """
+    hw_key = hardware.lower()
+    if hw_key == 'jetsonorin':
+        hw_key = 'orin'
+
+    # Exact match (no suffix)
+    candidate = lut_dir / f"lut_{hw_key}.json"
+    if candidate.exists():
+        return candidate
+
+    # Glob fallback for suffixed names (e.g., lut_a6000_original.json)
+    matches = sorted(lut_dir.glob(f"lut_{hw_key}*.json"))
+    if matches:
+        return matches[0]
+
+    return None
 
 
 def _wandb_active(args) -> bool:
@@ -284,10 +309,9 @@ def search_architecture_linas(args, dataset):
                 primary_hw = getattr(args, 'primary_hardware', None)
                 candidate = None
                 if primary_hw:
-                    candidate = lut_dir_path / f"lut_{primary_hw.lower()}.json"
-                    if not candidate.exists():
-                        print(f"Warning: LUT not found for primary_hardware={primary_hw}: {candidate}")
-                        candidate = None
+                    candidate = _resolve_lut_path(lut_dir_path, primary_hw)
+                    if candidate is None:
+                        print(f"Warning: LUT not found for primary_hardware={primary_hw} in {lut_dir_path}")
 
                 if candidate is None:
                     lut_files = sorted(lut_dir_path.glob("lut_*.json"))
@@ -434,10 +458,9 @@ def search_architecture_linas_ps(args, dataset):
                 primary_hw = getattr(args, 'primary_hardware', None)
                 candidate = None
                 if primary_hw:
-                    candidate = lut_dir_path / f"lut_{primary_hw.lower()}.json"
-                    if not candidate.exists():
-                        print(f"Warning: LUT not found for primary_hardware={primary_hw}: {candidate}")
-                        candidate = None
+                    candidate = _resolve_lut_path(lut_dir_path, primary_hw)
+                    if candidate is None:
+                        print(f"Warning: LUT not found for primary_hardware={primary_hw} in {lut_dir_path}")
                 if candidate is None:
                     lut_files = sorted(lut_dir_path.glob("lut_*.json"))
                     if lut_files:
@@ -481,12 +504,19 @@ def search_architecture_linas_ps(args, dataset):
                 kd_alpha=ps_kd_alpha,
             ))
 
+    # Proposal 5: Create EMA teacher for self-distillation
+    ema_teacher = None
+    if getattr(args, 'use_self_distillation', False):
+        ema_teacher = EMATeacher(model, decay=getattr(args, 'ema_decay', 0.999))
+        print(f"Self-distillation enabled: EMA decay={args.ema_decay}, SD alpha={args.sd_alpha}")
+
     train_architecture_with_latency_ps(
         args, model, dataset, loss, optimizer_alpha, optimizer_weight,
         latency_predictor=latency_predictor,
         latency_lut=latency_lut,
         hardware_targets=hardware_targets,
         ps_phases=ps_phases,
+        ema_teacher=ema_teacher,
     )
 
     return model
@@ -608,12 +638,12 @@ def discover_pareto_architectures(args, model, dataset):
     from latency import LatencyLUT
     luts = {}
     for hw in hardware_list:
-        lut_path = lut_dir / f'lut_{hw.lower()}.json'
-        if lut_path.exists():
+        lut_path = _resolve_lut_path(lut_dir, hw)
+        if lut_path is not None:
             luts[hw] = LatencyLUT(str(lut_path))
-            print(f"Loaded LUT for {hw}")
+            print(f"Loaded LUT for {hw}: {lut_path.name}")
         else:
-            print(f"Warning: LUT not found for {hw}: {lut_path}")
+            print(f"Warning: LUT not found for {hw} in {lut_dir}")
 
     if not luts:
         raise RuntimeError("No LUT files found. Run measure_latency.sh first.")
