@@ -12,6 +12,35 @@ from dataclasses import dataclass
 from utils.utils import AverageMeter, get_iou_score
 
 
+def _amp_autocast(use_amp):
+    """Return autocast context manager (no-op if use_amp is False)."""
+    if use_amp:
+        return torch.cuda.amp.autocast()
+    return nullcontext()
+
+
+def _amp_backward(scaler, loss):
+    """Backward with optional GradScaler."""
+    if scaler is not None:
+        scaler.scale(loss).backward()
+    else:
+        loss.backward()
+
+
+def _amp_step(scaler, optimizer, model=None, clip_grad=None):
+    """Optimizer step with optional GradScaler and gradient clipping."""
+    if scaler is not None:
+        if clip_grad is not None and model is not None:
+            scaler.unscale_(optimizer)
+            nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
+        scaler.step(optimizer)
+        scaler.update()
+    else:
+        if clip_grad is not None and model is not None:
+            nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
+        optimizer.step()
+
+
 def calculate_gumbel_temperature(epoch, total_epochs, tau_max=5.0, tau_min=0.1):
     """
     Calculate Gumbel-Softmax temperature with exponential annealing.
@@ -231,7 +260,8 @@ def _build_sandwich_width_indices(active_indices: List[int], k_random: int) -> L
 
 
 # train warmup
-def train_warmup(model, train_loader, loss, optimizer_weight):
+def train_warmup(model, train_loader, loss, optimizer_weight,
+                 use_amp=False, scaler=None):
     model.train()
     train_loss = AverageMeter()
     train_iou = AverageMeter()
@@ -242,16 +272,19 @@ def train_warmup(model, train_loader, loss, optimizer_weight):
         data, labels = data.to(device, non_blocking=True), labels.to(device, non_blocking=True)
         batch_size = data.size(0)
         optimizer_weight.zero_grad()
-        outputs = model(data)
-        loss_value = loss(outputs, labels)
+
+        with _amp_autocast(use_amp):
+            outputs = model(data)
+            loss_value = loss(outputs, labels)
+
         train_loss.update(loss_value.item(), batch_size)
-        loss_value.backward()
+        _amp_backward(scaler, loss_value)
 
         # get iou with smp
         iou_score = get_iou_score(outputs, labels)
         train_iou.update(iou_score, batch_size)
 
-        optimizer_weight.step()
+        _amp_step(scaler, optimizer_weight)
         train_loader.set_postfix(
             loss=f"{train_loss.avg:.4f}",
             iou=f"{train_iou.avg:.4f}",
@@ -269,6 +302,8 @@ def train_weight_alpha(
     optimizer_weight,
     optimizer_alpha,
     epoch=0,
+    use_amp=False,
+    scaler=None,
 ):
     # Calculate Gumbel-Softmax temperature for current epoch
     current_temp = calculate_gumbel_temperature(epoch, args.epochs)
@@ -286,13 +321,16 @@ def train_weight_alpha(
         data, labels = data.to(device, non_blocking=True), labels.to(device, non_blocking=True)
         batch_size = data.size(0)
         optimizer_weight.zero_grad()
-        outputs = model(data, temperature=current_temp, hard=hard_mode)
-        loss_value = loss(outputs, labels)
+
+        with _amp_autocast(use_amp):
+            outputs = model(data, temperature=current_temp, hard=hard_mode)
+            loss_value = loss(outputs, labels)
+
         train_w_loss.update(loss_value.item(), batch_size)
         train_w_iou.update(get_iou_score(outputs, labels), batch_size)
 
-        loss_value.backward()
-        optimizer_weight.step()
+        _amp_backward(scaler, loss_value)
+        _amp_step(scaler, optimizer_weight)
         train_loader.set_postfix(
             loss=f"{train_w_loss.avg:.4f}",
             iou=f"{train_w_iou.avg:.4f}",
@@ -305,8 +343,10 @@ def train_weight_alpha(
         data, labels = data.to(device, non_blocking=True), labels.to(device, non_blocking=True)
         batch_size = data.size(0)
         optimizer_alpha.zero_grad()
-        outputs = model(data, temperature=current_temp, hard=hard_mode)
-        ce_loss = loss(outputs, labels)
+
+        with _amp_autocast(use_amp):
+            outputs = model(data, temperature=current_temp, hard=hard_mode)
+            ce_loss = loss(outputs, labels)
 
         # Multi-objective: Add FLOPs penalty using Gumbel-Softmax sampling
         # This gives FLOPs closer to actual selected operation (not weighted average)
@@ -342,9 +382,8 @@ def train_weight_alpha(
         train_a_flops.update(argmax_flops, batch_size)
         train_a_iou.update(get_iou_score(outputs, labels), batch_size)
 
-        total_loss.backward()
-        nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
-        optimizer_alpha.step()
+        _amp_backward(scaler, total_loss)
+        _amp_step(scaler, optimizer_alpha, model=model, clip_grad=args.clip_grad)
 
         if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
             model.module.clip_alphas()
@@ -379,6 +418,8 @@ def train_weight_alpha_with_latency(
     latency_lut=None,
     hardware_targets: Optional[Dict[str, float]] = None,
     epoch=0,
+    use_amp=False,
+    scaler=None,
 ):
     """
     Train weight and alpha with multi-hardware latency constraints.
@@ -396,6 +437,8 @@ def train_weight_alpha_with_latency(
         hardware_targets: Dict mapping hardware name to target latency (ms)
             e.g., {'A6000': 50, 'RTX4090': 40, 'JetsonOrin': 100}
         epoch: Current epoch number (for temperature scheduling)
+        use_amp: Enable automatic mixed precision
+        scaler: GradScaler instance (or None)
 
     Returns:
         Tuple of metrics: (w_loss, w_iou, a_loss, a_iou, latency)
@@ -418,13 +461,16 @@ def train_weight_alpha_with_latency(
         data, labels = data.to(device, non_blocking=True), labels.to(device, non_blocking=True)
         batch_size = data.size(0)
         optimizer_weight.zero_grad()
-        outputs = model(data, temperature=current_temp, hard=hard_mode)
-        loss_value = loss(outputs, labels)
+
+        with _amp_autocast(use_amp):
+            outputs = model(data, temperature=current_temp, hard=hard_mode)
+            loss_value = loss(outputs, labels)
+
         train_w_loss.update(loss_value.item(), batch_size)
         train_w_iou.update(get_iou_score(outputs, labels), batch_size)
 
-        loss_value.backward()
-        optimizer_weight.step()
+        _amp_backward(scaler, loss_value)
+        _amp_step(scaler, optimizer_weight)
         train_loader_iter.set_postfix(
             loss=f"{train_w_loss.avg:.4f}",
             iou=f"{train_w_iou.avg:.4f}",
@@ -437,8 +483,10 @@ def train_weight_alpha_with_latency(
         data, labels = data.to(device, non_blocking=True), labels.to(device, non_blocking=True)
         batch_size = data.size(0)
         optimizer_alpha.zero_grad()
-        outputs = model(data, temperature=current_temp, hard=hard_mode)
-        ce_loss = loss(outputs, labels)
+
+        with _amp_autocast(use_amp):
+            outputs = model(data, temperature=current_temp, hard=hard_mode)
+            ce_loss = loss(outputs, labels)
 
         # Get architecture encoding
         if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
@@ -532,9 +580,8 @@ def train_weight_alpha_with_latency(
         train_latency.update(current_latency, batch_size)
         train_a_iou.update(get_iou_score(outputs, labels), batch_size)
 
-        total_loss.backward()
-        nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
-        optimizer_alpha.step()
+        _amp_backward(scaler, total_loss)
+        _amp_step(scaler, optimizer_alpha, model=model, clip_grad=args.clip_grad)
 
         if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
             model.module.clip_alphas()
@@ -640,6 +687,12 @@ def train_architecture_with_latency(
     best_val_iou = -float('inf')
     best_constrained_score = -float('inf')
 
+    # AMP setup
+    use_amp = getattr(args, 'use_amp', False)
+    scaler = torch.cuda.amp.GradScaler() if use_amp else None
+    if use_amp and _is_main_process(args):
+        print("Mixed Precision (AMP) enabled")
+
     # Track GPU hours
     warmup_start_time = time.time()
 
@@ -648,8 +701,9 @@ def train_architecture_with_latency(
         # Set epoch for DistributedSampler (critical for proper shuffling)
         if hasattr(args, 'distributed') and args.distributed:
             train_sampler.set_epoch(epoch)
-        train_loss, train_iou = train_warmup(model, train_loader, loss, optimizer_weight)
-        val_iou = test_architecture(model, val_loader, desc="Warmup Val")
+        train_loss, train_iou = train_warmup(model, train_loader, loss, optimizer_weight,
+                                              use_amp=use_amp, scaler=scaler)
+        val_iou = test_architecture(model, val_loader, desc="Warmup Val", use_amp=use_amp)
 
         print(f"Epoch {epoch+1}/{args.warmup_epochs}, "
               f"Train Loss: {train_loss:.4f}, Train mIoU: {train_iou:.4f}, "
@@ -687,10 +741,12 @@ def train_architecture_with_latency(
                 latency_predictor=latency_predictor,
                 latency_lut=latency_lut,
                 hardware_targets=hardware_targets,
+                use_amp=use_amp,
+                scaler=scaler,
             )
         )
 
-        val_iou = test_architecture(model, val_loader, desc="Search Val")
+        val_iou = test_architecture(model, val_loader, desc="Search Val", use_amp=use_amp)
         constraint_stats = _estimate_constraint_violation(
             args,
             model,
@@ -746,12 +802,12 @@ def train_architecture_with_latency(
         state_dict = torch.load(best_path, map_location=next(model_to_load.parameters()).device)
         model_to_load.load_state_dict(state_dict)
 
-    final_test_iou = test_architecture(model, test_loader, desc="Final Test")
+    final_test_iou = test_architecture(model, test_loader, desc="Final Test", use_amp=use_amp)
     print(f"[Final Test] mIoU: {final_test_iou:.4f}")
 
 
 # test search architecture
-def test_architecture(model, test_loader, desc="Eval"):
+def test_architecture(model, test_loader, desc="Eval", use_amp=False):
     if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
         model.module.eval()  # DataParallel 또는 DDP를 사용 중인 경우
     else:
@@ -767,7 +823,7 @@ def test_architecture(model, test_loader, desc="Eval"):
     if show_pbar:
         test_loader = tqdm(test_loader, desc=desc, total=len(test_loader))
 
-    with torch.no_grad():
+    with torch.no_grad(), _amp_autocast(use_amp):
         for data, labels in test_loader:
             device = next(model.parameters()).device
             data, labels = data.to(device, non_blocking=True), labels.to(device, non_blocking=True)
@@ -850,6 +906,12 @@ def train_architecture(
 
     best_val_iou = -float('inf')
 
+    # AMP setup
+    use_amp = getattr(args, 'use_amp', False)
+    scaler = torch.cuda.amp.GradScaler() if use_amp else None
+    if use_amp and _is_main_process(args):
+        print("Mixed Precision (AMP) enabled")
+
     # Initialize FLOPs normalization base once (using argmax FLOPs)
     if getattr(args, "flops_norm_base", None) is None:
         with torch.no_grad():
@@ -869,8 +931,9 @@ def train_architecture(
         if hasattr(args, 'distributed') and args.distributed:
             train_sampler.set_epoch(epoch)
 
-        train_loss, train_iou = train_warmup(model, train_loader, loss, optimizer_weight)
-        val_iou = test_architecture(model, val_loader, desc="Warmup Val")
+        train_loss, train_iou = train_warmup(model, train_loader, loss, optimizer_weight,
+                                              use_amp=use_amp, scaler=scaler)
+        val_iou = test_architecture(model, val_loader, desc="Warmup Val", use_amp=use_amp)
 
         print(f"Epoch {epoch+1}/{args.epochs}, Train Loss: {train_loss:.4f}, Train IOU: {train_iou:.4f}, Val IOU: {val_iou:.4f}")
 
@@ -905,10 +968,12 @@ def train_architecture(
                 loss,
                 optimizer_weight,
                 optimizer_alpha,
+                use_amp=use_amp,
+                scaler=scaler,
             )
         )
 
-        val_iou = test_architecture(model, val_loader, desc="Search Val")
+        val_iou = test_architecture(model, val_loader, desc="Search Val", use_amp=use_amp)
 
         if val_iou > best_val_iou:
             best_val_iou = val_iou  # Update the best IoU
@@ -949,7 +1014,7 @@ def train_architecture(
         state_dict = torch.load(best_path, map_location=next(model_to_load.parameters()).device)
         model_to_load.load_state_dict(state_dict)
 
-    final_test_iou = test_architecture(model, test_loader, desc="Final Test")
+    final_test_iou = test_architecture(model, test_loader, desc="Final Test", use_amp=use_amp)
     print(f"[Final Test] mIoU: {final_test_iou:.4f}")
 
 
@@ -1027,6 +1092,8 @@ def train_weight_alpha_with_latency_ps(
     hardware_targets: Optional[Dict[str, float]] = None,
     epoch=0,
     phase_config: Optional[PSPhaseConfig] = None,
+    use_amp=False,
+    scaler=None,
 ):
     """Progressive Shrinking variant: weight training includes KD loss from teacher."""
     current_temp = calculate_gumbel_temperature(epoch, args.epochs)
@@ -1078,134 +1145,153 @@ def train_weight_alpha_with_latency_ps(
                 # Use no_sync for all but the last subnet to defer gradient all-reduce
                 ctx = model.no_sync() if (is_ddp and not is_last) else nullcontext()
                 with ctx:
-                    outputs_sub = model(data, temperature=current_temp, hard=hard_mode)
-                    task_loss_sub = loss(outputs_sub, labels)
+                    with _amp_autocast(use_amp):
+                        outputs_sub = model(data, temperature=current_temp, hard=hard_mode)
+                        task_loss_sub = loss(outputs_sub, labels)
 
-                    if idx_pos == 0:
-                        teacher_output = outputs_sub.detach()
-                        subnet_loss = task_loss_sub / num_subnets
-                        train_w_loss.update(task_loss_sub.item(), batch_size)
-                        train_w_iou.update(get_iou_score(outputs_sub, labels), batch_size)
-                    else:
-                        kd_loss = F.kl_div(
-                            F.log_softmax(outputs_sub / kd_temp_eff, dim=1),
-                            F.softmax(teacher_output / kd_temp_eff, dim=1),
-                            reduction='batchmean'
-                        ) * (kd_temp_eff ** 2)
-                        subnet_loss = ((1 - kd_alpha_eff) * task_loss_sub + kd_alpha_eff * kd_loss) / num_subnets
+                        if idx_pos == 0:
+                            teacher_output = outputs_sub.detach()
+                            subnet_loss = task_loss_sub / num_subnets
+                            train_w_loss.update(task_loss_sub.item(), batch_size)
+                            train_w_iou.update(get_iou_score(outputs_sub, labels), batch_size)
+                        else:
+                            kd_loss = F.kl_div(
+                                F.log_softmax(outputs_sub / kd_temp_eff, dim=1),
+                                F.softmax(teacher_output / kd_temp_eff, dim=1),
+                                reduction='batchmean'
+                            ) * (kd_temp_eff ** 2)
+                            subnet_loss = ((1 - kd_alpha_eff) * task_loss_sub + kd_alpha_eff * kd_loss) / num_subnets
 
-                    subnet_loss.backward()
+                    _amp_backward(scaler, subnet_loss)
 
             module.set_active_widths(original_active)
             # Gradients already accumulated; skip total_weight_loss.backward() below
-            optimizer_weight.step()
+            _amp_step(scaler, optimizer_weight)
             train_loader_iter.set_postfix(
                 loss=f"{train_w_loss.avg:.4f}",
                 iou=f"{train_w_iou.avg:.4f}",
             )
             continue
         else:
-            outputs = model(data, temperature=current_temp, hard=hard_mode)
-            task_loss = loss(outputs, labels)
+            with _amp_autocast(use_amp):
+                outputs = model(data, temperature=current_temp, hard=hard_mode)
+                task_loss = loss(outputs, labels)
 
-            total_weight_loss = task_loss
-            if use_kd:
-                teacher_output = module.forward_teacher(data)
-                kd_loss = F.kl_div(
-                    F.log_softmax(outputs / kd_temp, dim=1),
-                    F.softmax(teacher_output / kd_temp, dim=1),
-                    reduction='batchmean'
-                ) * (kd_temp ** 2)
-                total_weight_loss = (1 - kd_alpha) * task_loss + kd_alpha * kd_loss
+                total_weight_loss = task_loss
+                if use_kd:
+                    teacher_output = module.forward_teacher(data)
+                    kd_loss = F.kl_div(
+                        F.log_softmax(outputs / kd_temp, dim=1),
+                        F.softmax(teacher_output / kd_temp, dim=1),
+                        reduction='batchmean'
+                    ) * (kd_temp ** 2)
+                    total_weight_loss = (1 - kd_alpha) * task_loss + kd_alpha * kd_loss
 
             train_w_loss.update(task_loss.item(), batch_size)
             train_w_iou.update(get_iou_score(outputs, labels), batch_size)
 
-        total_weight_loss.backward()
-        optimizer_weight.step()
+        _amp_backward(scaler, total_weight_loss)
+        _amp_step(scaler, optimizer_weight)
         train_loader_iter.set_postfix(
             loss=f"{train_w_loss.avg:.4f}",
             iou=f"{train_w_iou.avg:.4f}",
         )
 
     # Phase 2: Train alpha with latency constraints (no KD for alpha)
+    # Use no_sync() to prevent DDP from triggering a second gradient
+    # all-reduce in the same forward-backward cycle (weight phase already
+    # performed one).  Alpha gradients are manually all-reduced afterwards.
+    is_ddp = isinstance(model, torch.nn.parallel.DistributedDataParallel)
+    alpha_sync_ctx = model.no_sync if is_ddp else nullcontext
+
     val_loader_iter = tqdm(val_loader, desc="Train Alpha (PS)", total=len(val_loader))
     for data, labels in val_loader_iter:
         device = next(model.parameters()).device
         data, labels = data.to(device, non_blocking=True), labels.to(device, non_blocking=True)
         batch_size = data.size(0)
         optimizer_alpha.zero_grad()
-        outputs = model(data, temperature=current_temp, hard=hard_mode)
-        ce_loss = loss(outputs, labels)
 
-        # Calculate latency penalty (identical to non-PS version)
-        latency_penalty = torch.tensor(0.0, device=data.device)
-        current_latency_val = 0.0
+        with alpha_sync_ctx():
+            with _amp_autocast(use_amp):
+                outputs = model(data, temperature=current_temp, hard=hard_mode)
+                ce_loss = loss(outputs, labels)
 
-        if latency_predictor is not None and hardware_targets is not None:
-            from latency import get_hardware_features
-            op_weights, width_weights = module.get_alpha_weights()
-            op_weights = op_weights.unsqueeze(0)
-            width_weights = width_weights.unsqueeze(0)
-            constraint_margin = float(getattr(args, 'constraint_margin', 0.0))
-            for hw_name, target_lat in hardware_targets.items():
-                hw_features = get_hardware_features(hw_name).to(data.device).unsqueeze(0)
-                safe_lat, _, _ = _predict_safe_latency_continuous(
-                    args,
-                    latency_predictor,
-                    hw_features,
-                    op_weights,
-                    width_weights,
-                )
-                lat_loss = F.relu(safe_lat - target_lat - constraint_margin)
-                latency_penalty = latency_penalty + args.latency_lambda * lat_loss.squeeze()
-            primary_hw = list(hardware_targets.keys())[0]
-            hw_features = get_hardware_features(primary_hw).to(data.device).unsqueeze(0)
-            with torch.no_grad():
-                op_indices, width_indices = module.get_arch_indices()
-                safe_lat, _, _ = _predict_safe_latency_discrete(
-                    args,
-                    latency_predictor,
-                    hw_features,
-                    op_indices.unsqueeze(0).to(data.device),
-                    width_indices.unsqueeze(0).to(data.device),
-                )
-                current_latency_val = safe_lat.item()
-        elif latency_lut is not None:
-            target_latency = getattr(args, "target_latency", None)
-            constraint_margin = float(getattr(args, 'constraint_margin', 0.0))
-            sampled_latency = module.get_sampled_latency(latency_lut, temperature=current_temp)
-            current_latency_val = module.get_argmax_latency(latency_lut)
-            if target_latency is not None and target_latency > 0:
-                latency_penalty = args.latency_lambda * F.relu(sampled_latency - target_latency - constraint_margin)
-            else:
-                latency_penalty = args.latency_lambda * sampled_latency
-        else:
-            sampled_flops = module.get_sampled_flops(args.resize, temperature=current_temp)
-            argmax_flops = module.get_argmax_flops(args.resize)
-            target_flops = getattr(args, "target_flops", None)
-            flops_norm_base = getattr(args, "flops_norm_base", None)
-            if target_flops is not None and target_flops > 0:
-                flops_diff = torch.abs(sampled_flops - target_flops)
-                if flops_norm_base is not None and flops_norm_base > 0:
-                    latency_penalty = args.flops_lambda * (flops_diff / flops_norm_base)
+            # Calculate latency penalty (identical to non-PS version)
+            latency_penalty = torch.tensor(0.0, device=data.device)
+            current_latency_val = 0.0
+
+            if latency_predictor is not None and hardware_targets is not None:
+                from latency import get_hardware_features
+                op_weights, width_weights = module.get_alpha_weights()
+                op_weights = op_weights.unsqueeze(0)
+                width_weights = width_weights.unsqueeze(0)
+                constraint_margin = float(getattr(args, 'constraint_margin', 0.0))
+                for hw_name, target_lat in hardware_targets.items():
+                    hw_features = get_hardware_features(hw_name).to(data.device).unsqueeze(0)
+                    safe_lat, _, _ = _predict_safe_latency_continuous(
+                        args,
+                        latency_predictor,
+                        hw_features,
+                        op_weights,
+                        width_weights,
+                    )
+                    lat_loss = F.relu(safe_lat - target_lat - constraint_margin)
+                    latency_penalty = latency_penalty + args.latency_lambda * lat_loss.squeeze()
+                primary_hw = list(hardware_targets.keys())[0]
+                hw_features = get_hardware_features(primary_hw).to(data.device).unsqueeze(0)
+                with torch.no_grad():
+                    op_indices, width_indices = module.get_arch_indices()
+                    safe_lat, _, _ = _predict_safe_latency_discrete(
+                        args,
+                        latency_predictor,
+                        hw_features,
+                        op_indices.unsqueeze(0).to(data.device),
+                        width_indices.unsqueeze(0).to(data.device),
+                    )
+                    current_latency_val = safe_lat.item()
+            elif latency_lut is not None:
+                target_latency = getattr(args, "target_latency", None)
+                constraint_margin = float(getattr(args, 'constraint_margin', 0.0))
+                sampled_latency = module.get_sampled_latency(latency_lut, temperature=current_temp)
+                current_latency_val = module.get_argmax_latency(latency_lut)
+                if target_latency is not None and target_latency > 0:
+                    latency_penalty = args.latency_lambda * F.relu(sampled_latency - target_latency - constraint_margin)
                 else:
-                    latency_penalty = args.flops_lambda * flops_diff
+                    latency_penalty = args.latency_lambda * sampled_latency
             else:
-                if flops_norm_base is not None and flops_norm_base > 0:
-                    latency_penalty = args.flops_lambda * (sampled_flops / flops_norm_base)
+                sampled_flops = module.get_sampled_flops(args.resize, temperature=current_temp)
+                argmax_flops = module.get_argmax_flops(args.resize)
+                target_flops = getattr(args, "target_flops", None)
+                flops_norm_base = getattr(args, "flops_norm_base", None)
+                if target_flops is not None and target_flops > 0:
+                    flops_diff = torch.abs(sampled_flops - target_flops)
+                    if flops_norm_base is not None and flops_norm_base > 0:
+                        latency_penalty = args.flops_lambda * (flops_diff / flops_norm_base)
+                    else:
+                        latency_penalty = args.flops_lambda * flops_diff
                 else:
-                    latency_penalty = args.flops_lambda * sampled_flops
-            current_latency_val = argmax_flops
+                    if flops_norm_base is not None and flops_norm_base > 0:
+                        latency_penalty = args.flops_lambda * (sampled_flops / flops_norm_base)
+                    else:
+                        latency_penalty = args.flops_lambda * sampled_flops
+                current_latency_val = argmax_flops
 
-        total_loss = ce_loss + latency_penalty
-        train_a_loss.update(ce_loss.item(), batch_size)
-        train_latency.update(current_latency_val, batch_size)
-        train_a_iou.update(get_iou_score(outputs, labels), batch_size)
+            total_loss = ce_loss + latency_penalty
+            train_a_loss.update(ce_loss.item(), batch_size)
+            train_latency.update(current_latency_val, batch_size)
+            train_a_iou.update(get_iou_score(outputs, labels), batch_size)
 
-        total_loss.backward()
-        nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
-        optimizer_alpha.step()
+            _amp_backward(scaler, total_loss)
+
+        # Manually all-reduce alpha gradients across DDP processes
+        if is_ddp and torch.distributed.is_initialized():
+            world_size = torch.distributed.get_world_size()
+            for p in module.get_alpha_params():
+                if p.grad is not None:
+                    torch.distributed.all_reduce(p.grad, op=torch.distributed.ReduceOp.SUM)
+                    p.grad.div_(world_size)
+
+        _amp_step(scaler, optimizer_alpha, model=model, clip_grad=args.clip_grad)
         module.clip_alphas()
 
         val_loader_iter.set_postfix(
@@ -1293,6 +1379,12 @@ def train_architecture_with_latency_ps(
     best_constrained_score = -float('inf')
     global_epoch = 0
 
+    # AMP setup
+    use_amp = getattr(args, 'use_amp', False)
+    scaler = torch.cuda.amp.GradScaler() if use_amp else None
+    if use_amp and _is_main_process(args):
+        print("Mixed Precision (AMP) enabled")
+
     # === WARMUP PHASE (width=1.0 only) ===
     max_width_idx = len(module.width_mults) - 1
     module.set_active_widths([max_width_idx])
@@ -1302,8 +1394,9 @@ def train_architecture_with_latency_ps(
     for epoch in range(args.warmup_epochs):
         if hasattr(args, 'distributed') and args.distributed:
             train_sampler.set_epoch(global_epoch)
-        train_loss, train_iou = train_warmup(model, train_loader, loss, optimizer_weight)
-        val_iou = test_architecture(model, val_loader, desc="PS Warmup Val")
+        train_loss, train_iou = train_warmup(model, train_loader, loss, optimizer_weight,
+                                              use_amp=use_amp, scaler=scaler)
+        val_iou = test_architecture(model, val_loader, desc="PS Warmup Val", use_amp=use_amp)
 
         print(f"Epoch {global_epoch+1}, "
               f"Train Loss: {train_loss:.4f}, Train mIoU: {train_iou:.4f}, "
@@ -1345,10 +1438,12 @@ def train_architecture_with_latency_ps(
                     hardware_targets=hardware_targets,
                     epoch=global_epoch,
                     phase_config=phase,
+                    use_amp=use_amp,
+                    scaler=scaler,
                 )
             )
 
-            val_iou = test_architecture(model, val_loader, desc=f"{phase.name} Val")
+            val_iou = test_architecture(model, val_loader, desc=f"{phase.name} Val", use_amp=use_amp)
             constraint_stats = _estimate_constraint_violation(
                 args,
                 model,
@@ -1398,5 +1493,5 @@ def train_architecture_with_latency_ps(
     # Ensure all widths are active for final evaluation
     module.set_active_widths(list(range(len(module.width_mults))))
 
-    final_test_iou = test_architecture(model, test_loader, desc="Final Test")
+    final_test_iou = test_architecture(model, test_loader, desc="Final Test", use_amp=use_amp)
     print(f"[Final Test] mIoU: {final_test_iou:.4f}")

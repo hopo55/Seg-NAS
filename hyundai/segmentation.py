@@ -15,6 +15,7 @@ from nas.train_supernet import (
 from nas.train_samplenet import train_samplenet
 from nas.pareto_search import ParetoSearcher, print_pareto_summary
 from nas.search_space import STANDARD_OP_NAMES, ALL_OP_NAMES, WIDTH_MULTS, calculate_search_space_size
+from utils.losses import get_loss_function
 
 
 def _wandb_active(args) -> bool:
@@ -88,7 +89,10 @@ def search_architecture(args, dataset):
     # Create SuperNet with specified search space
     search_space = getattr(args, 'search_space', 'basic')
     encoder_name = getattr(args, 'encoder_name', 'densenet121')
-    model = SuperNet(n_class=2, search_space=search_space, encoder_name=encoder_name)
+    grad_ckpt = getattr(args, 'gradient_checkpointing', False)
+    sp_train = getattr(args, 'single_path_training', False)
+    model = SuperNet(n_class=2, search_space=search_space, encoder_name=encoder_name,
+                     gradient_checkpointing=grad_ckpt, single_path_training=sp_train)
     op_names, width_mults = _describe_search_space(search_space)
     print(f"Encoder: {encoder_name}")
     print(f"Search space: {search_space}")
@@ -98,6 +102,10 @@ def search_architecture(args, dataset):
         print(f"  - Total: {calculate_search_space_size(op_names, list(width_mults)):,} architectures")
     else:
         print(f"  - Total: {calculate_search_space_size(op_names, [1.0]):,} architectures")
+    if grad_ckpt:
+        print("Gradient checkpointing: enabled (encoder)")
+    if sp_train:
+        print("Single-path training: enabled (SPOS-style)")
 
     model = model.to(device)
 
@@ -108,7 +116,7 @@ def search_architecture(args, dataset):
             model,
             device_ids=[args.local_rank],
             output_device=args.local_rank,
-            find_unused_parameters=False
+            find_unused_parameters=sp_train  # single-path leaves unused ops
         )
         if args.rank == 0:
             print(f"Using DDP with {args.world_size} GPUs")
@@ -122,7 +130,7 @@ def search_architecture(args, dataset):
         else:
             print("Using CPU")
 
-    loss = nn.CrossEntropyLoss()
+    loss = get_loss_function(getattr(args, 'loss_type', 'ce'))
 
     # Get alpha parameters (handles both basic and extended search spaces)
     alphas_params = [
@@ -169,13 +177,20 @@ def search_architecture_linas(args, dataset):
     if search_space == 'basic':
         raise ValueError("LINAS requires width-aware search space ('extended' or 'industry').")
     encoder_name = getattr(args, 'encoder_name', 'densenet121')
-    model = SuperNet(n_class=2, search_space=search_space, encoder_name=encoder_name)
+    grad_ckpt = getattr(args, 'gradient_checkpointing', False)
+    sp_train = getattr(args, 'single_path_training', False)
+    model = SuperNet(n_class=2, search_space=search_space, encoder_name=encoder_name,
+                     gradient_checkpointing=grad_ckpt, single_path_training=sp_train)
     op_names, width_mults = _describe_search_space(search_space)
     print(f"Encoder: {encoder_name}")
     print(f"LINAS Search Space: {search_space}")
     print(f"  - {len(op_names)} operations: {', '.join(op_names)}")
     print(f"  - {len(width_mults)} width multipliers: {list(width_mults)}")
     print(f"  - Total: {calculate_search_space_size(op_names, list(width_mults)):,} architectures")
+    if grad_ckpt:
+        print("Gradient checkpointing: enabled (encoder)")
+    if sp_train:
+        print("Single-path training: enabled (SPOS-style)")
 
     model = model.to(device)
 
@@ -186,7 +201,7 @@ def search_architecture_linas(args, dataset):
             model,
             device_ids=[args.local_rank],
             output_device=args.local_rank,
-            find_unused_parameters=False
+            find_unused_parameters=sp_train  # single-path leaves unused ops
         )
         if args.rank == 0:
             print(f"Using DDP with {args.world_size} GPUs")
@@ -200,7 +215,7 @@ def search_architecture_linas(args, dataset):
         else:
             print("Using CPU")
 
-    loss = nn.CrossEntropyLoss()
+    loss = get_loss_function(getattr(args, 'loss_type', 'ce'))
 
     # Get alpha and weight parameters
     alphas_params = [
@@ -324,13 +339,20 @@ def search_architecture_linas_ps(args, dataset):
     if search_space == 'basic':
         raise ValueError("LINAS+PS requires width-aware search space ('extended' or 'industry').")
     encoder_name = getattr(args, 'encoder_name', 'densenet121')
-    model = SuperNet(n_class=2, search_space=search_space, encoder_name=encoder_name)
+    grad_ckpt = getattr(args, 'gradient_checkpointing', False)
+    sp_train = getattr(args, 'single_path_training', False)
+    model = SuperNet(n_class=2, search_space=search_space, encoder_name=encoder_name,
+                     gradient_checkpointing=grad_ckpt, single_path_training=sp_train)
     op_names, width_mults = _describe_search_space(search_space)
     print(f"Encoder: {encoder_name}")
     print(f"LINAS+PS Search Space: {search_space}")
     print(f"  - {len(op_names)} operations: {', '.join(op_names)}")
     print(f"  - {len(width_mults)} width multipliers: {list(width_mults)}")
     print(f"  - Total: {calculate_search_space_size(op_names, list(width_mults)):,} architectures")
+    if grad_ckpt:
+        print("Gradient checkpointing: enabled (encoder)")
+    if sp_train:
+        print("Single-path training: enabled (SPOS-style)")
 
     model = model.to(device)
 
@@ -352,7 +374,7 @@ def search_architecture_linas_ps(args, dataset):
         else:
             print("Using CPU")
 
-    loss = nn.CrossEntropyLoss()
+    loss = get_loss_function(getattr(args, 'loss_type', 'ce'))
 
     alphas_params = [
         param for name, param in model.named_parameters() if "alpha" in name.lower()
@@ -547,7 +569,7 @@ def train_searched_model(args, opt_model, dataset):
         wandb.run.summary['Model/Final FLOPs (GFLOPs)'] = gflops
         wandb.run.summary['Model/Final Parameters (M)'] = params_m
 
-    loss = nn.CrossEntropyLoss()
+    loss = get_loss_function(getattr(args, 'loss_type', 'ce'))
     optimizer = torch.optim.Adam(opt_model.parameters(), lr=args.opt_lr)
 
     train_samplenet(args,

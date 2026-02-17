@@ -79,8 +79,21 @@ class MixedSkip(nn.Module):
     def _gumbel_softmax_skip(self, temperature=1.0, hard=False):
         return F.gumbel_softmax(self.alphas_skip, tau=temperature, hard=hard)
 
-    def forward(self, decoder_feat, encoder_feat, temperature=1.0, hard=False):
-        w = self._gumbel_softmax_skip(temperature=temperature, hard=hard)
+    def forward(self, decoder_feat, encoder_feat, temperature=1.0, hard=False,
+                single_path=False):
+        w = self._gumbel_softmax_skip(temperature=temperature, hard=hard or single_path)
+
+        if single_path:
+            idx = torch.argmax(w).item()
+            if idx == 0:  # add
+                return decoder_feat + encoder_feat
+            elif idx == 1:  # concat
+                return self.concat_bn(self.concat_proj(
+                    torch.cat([decoder_feat, encoder_feat], dim=1)
+                ))
+            else:  # attn_gate
+                gate = torch.sigmoid(self.attn_bn(self.attn_conv(encoder_feat)))
+                return decoder_feat * gate
 
         # add
         out_add = decoder_feat + encoder_feat
@@ -156,9 +169,15 @@ class MixedOp(nn.Module):
         """Kept for backward compatibility."""
         return torch.nn.functional.gumbel_softmax(self.alphas, tau=temperature, hard=hard)
 
-    def forward(self, x, temperature=1.0, hard=False):
-        weights = self._gumbel_softmax(temperature=temperature, hard=hard)
-        x = sum(alpha * op(x) for alpha, op in zip(weights, self._ops))
+    def forward(self, x, temperature=1.0, hard=False, single_path=False):
+        weights = self._gumbel_softmax(temperature=temperature, hard=hard or single_path)
+
+        if single_path:
+            idx = torch.argmax(weights).item()
+            x = self._ops[idx](x)
+        else:
+            x = sum(alpha * op(x) for alpha, op in zip(weights, self._ops))
+
         x = self.relu(x)
         x = self.bn(x)
         return x
@@ -274,12 +293,32 @@ class MixedOpWithWidth(nn.Module):
         active_alphas = self.alphas_width[active]
         return F.gumbel_softmax(active_alphas, tau=temperature, hard=hard)
 
-    def forward(self, x, temperature=1.0, hard=False):
-        outputs = []
-        op_weights = self._gumbel_softmax_op(temperature=temperature, hard=hard)
-        width_weights = self._gumbel_softmax_width(temperature=temperature, hard=hard)
+    def forward(self, x, temperature=1.0, hard=False, single_path=False):
+        op_weights = self._gumbel_softmax_op(temperature=temperature, hard=hard or single_path)
+        width_weights = self._gumbel_softmax_width(temperature=temperature, hard=hard or single_path)
 
         active = self._active_width_indices
+
+        if single_path:
+            # Execute only the sampled (op, width) pair
+            op_idx = torch.argmax(op_weights).item()
+            w_local = torch.argmax(width_weights).item()
+            global_wi = active[w_local]
+            wm = self.width_mults[global_wi]
+            wm_key = f"w{int(wm*100)}"
+            ops = self._ops[wm_key]
+            bn = getattr(self, f'bn_{wm_key}')
+
+            out = ops[op_idx](x)
+            out = self.relu(out)
+            out = bn(out)
+
+            if wm != 1.0:
+                proj = getattr(self, f'proj_{wm_key}')
+                out = proj(out)
+            return out
+
+        outputs = []
         for local_wi, global_wi in enumerate(active):
             wm = self.width_mults[global_wi]
             wm_key = f"w{int(wm*100)}"

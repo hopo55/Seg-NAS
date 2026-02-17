@@ -48,7 +48,7 @@ RESIZE_W=${RESIZE_W:-}
 TEST_RATIO=0.2
 
 # Training Settings
-BATCH_SIZE=32
+BATCH_SIZE=2
 ALPHA_LR=0.001
 W_LR=0.001
 OPT_LR=0.001
@@ -71,6 +71,9 @@ PRIMARY_HARDWARE='RTX4090'
 # LINAS Settings
 LATENCY_LAMBDA=1.0
 
+# Loss function: 'ce' (CrossEntropy) or 'dice_boundary' (CE+Dice+Boundary)
+LOSS_TYPE='dice_boundary'
+
 # Target latencies (ms) for each hardware - cycle time constraint: 100ms
 # Actual speed order: RTX4090 > RTX3090 > A6000 > JetsonOrin > RaspberryPi5 > Odroid
 declare -A HARDWARE_TARGETS
@@ -87,6 +90,11 @@ USE_PS=true                # Set to true to enable progressive shrinking
 PS_PHASE_EPOCHS="1 1 1"  # Epochs per phase: [width=1.0] [0.75,1.0] [0.5,0.75,1.0]
 PS_KD_ALPHA=0.5             # Knowledge distillation loss weight
 PS_KD_TEMPERATURE=4.0       # Knowledge distillation temperature
+
+# Memory optimization
+USE_AMP=true               # FP16 mixed precision (~40-50% memory reduction)
+GRADIENT_CHECKPOINTING=true # Recompute encoder activations (~30-40% memory reduction)
+SINGLE_PATH_TRAINING=true   # SPOS-style: 1 op per step instead of all 45 (~70-80% memory reduction)
 
 # CALOFA settings
 #   - ws_pareto: legacy sampling + weight-sharing evaluation
@@ -263,6 +271,20 @@ build_ps_flags() {
     fi
 }
 
+build_memory_flags() {
+    local flags=""
+    if [ "$USE_AMP" = "true" ]; then
+        flags="$flags --use_amp"
+    fi
+    if [ "$GRADIENT_CHECKPOINTING" = "true" ]; then
+        flags="$flags --gradient_checkpointing"
+    fi
+    if [ "$SINGLE_PATH_TRAINING" = "true" ]; then
+        flags="$flags --single_path_training"
+    fi
+    echo "$flags"
+}
+
 build_calofa_flags() {
     local flags="--search_backend $SEARCH_BACKEND --ofa_sandwich_k $OFA_SANDWICH_K --latency_uncertainty_beta $LATENCY_UNCERTAINTY_BETA --constraint_margin $CONSTRAINT_MARGIN --evo_population $EVO_POPULATION --evo_generations $EVO_GENERATIONS --evo_mutation_prob $EVO_MUTATION_PROB --evo_crossover_prob $EVO_CROSSOVER_PROB"
     if [ "$REPORT_HV_IGD" = "true" ]; then
@@ -291,6 +313,7 @@ run_pareto() {
     local HW_TARGETS=$(build_hardware_targets_json)
     local PS_FLAGS=$(build_ps_flags)
     local CALOFA_FLAGS=$(build_calofa_flags)
+    local MEMORY_FLAGS=$(build_memory_flags)
 
     echo "========================================"
     echo "PARETO-BASED NAS (RF-DETR Style)"
@@ -360,8 +383,10 @@ run_pareto() {
         --pareto_eval_subset $PARETO_EVAL_SUBSET \
         --pareto_refine_topk $PARETO_REFINE_TOPK \
         --primary_hardware $PRIMARY_HARDWARE \
+        --loss_type $LOSS_TYPE \
         $CALOFA_FLAGS \
-        $PS_FLAGS
+        $PS_FLAGS \
+        $MEMORY_FLAGS
 }
 
 run_single() {
@@ -371,6 +396,7 @@ run_single() {
     local LUT_PATH=""
     local PS_FLAGS=$(build_ps_flags)
     local CALOFA_FLAGS=$(build_calofa_flags)
+    local MEMORY_FLAGS=$(build_memory_flags)
 
     if ! LUT_PATH=$(resolve_lut_path "$HARDWARE"); then
         echo "Error: LUT file not found for '$HARDWARE' in $LUT_DIR (suffix: '$LUT_SUFFIX')"
@@ -426,8 +452,10 @@ run_single() {
         --primary_hardware $HARDWARE \
         --use_latency \
         --lut_path $LUT_PATH \
+        --loss_type $LOSS_TYPE \
         $CALOFA_FLAGS \
-        $PS_FLAGS
+        $PS_FLAGS \
+        $MEMORY_FLAGS
 }
 
 # =============================================================================

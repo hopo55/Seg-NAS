@@ -149,6 +149,19 @@ def get_args(include_comparison_args=False):
     parser.add_argument('--log_dir', type=str, default='./logs',
                         help="Directory to save TensorBoard logs")
 
+    # Loss function
+    parser.add_argument('--loss_type', type=str, default='ce',
+                        choices=['ce', 'dice_boundary'],
+                        help='Loss function: ce (CrossEntropy) or dice_boundary (CE+Dice+Boundary)')
+
+    # Memory optimization
+    parser.add_argument('--use_amp', action='store_true',
+                        help='Enable FP16 Automatic Mixed Precision training')
+    parser.add_argument('--gradient_checkpointing', action='store_true',
+                        help='Enable gradient checkpointing on encoder to save memory')
+    parser.add_argument('--single_path_training', action='store_true',
+                        help='SPOS-style single-path sampling (1 op+width per step instead of weighted sum)')
+
     # Distributed training arguments
     parser.add_argument('--dist-backend', default='nccl', type=str,
                         help='Distributed backend (default: nccl)')

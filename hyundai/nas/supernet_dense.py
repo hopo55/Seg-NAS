@@ -1,6 +1,7 @@
 import copy
 import torch
 from torch import nn
+from torch.utils.checkpoint import checkpoint as grad_checkpoint
 from torchvision import models as tv_models
 from torchvision.models import DenseNet121_Weights, densenet121
 
@@ -156,11 +157,14 @@ class SuperNet(nn.Module):
         search_space: 'basic', 'extended', or 'industry'
         encoder_name: encoder backbone name (see ENCODER_CONFIGS)
     """
-    def __init__(self, n_class, search_space='basic', encoder_name='densenet121'):
+    def __init__(self, n_class, search_space='basic', encoder_name='densenet121',
+                 gradient_checkpointing=False, single_path_training=False):
         super().__init__()
         self.n_class = n_class
         self.search_space = search_space
         self.encoder_name = encoder_name
+        self.gradient_checkpointing = gradient_checkpointing
+        self.single_path_training = single_path_training
 
         self.pretrained_net, enc_channels = get_encoder(encoder_name)
         # enc_channels = [x1, x2, x3, x4, x5]
@@ -216,7 +220,11 @@ class SuperNet(nn.Module):
         return [self.skip1, self.skip2, self.skip3, self.skip4]
 
     def forward(self, x, temperature=1.0, hard=False):
-        output = self.pretrained_net(x)
+        # Gradient checkpointing: recompute encoder activations during backward
+        if self.gradient_checkpointing and self.training:
+            output = grad_checkpoint(self.pretrained_net, x, use_reentrant=False)
+        else:
+            output = self.pretrained_net(x)
 
         x5 = output["x5"]
         x4 = output["x4"]
@@ -224,15 +232,17 @@ class SuperNet(nn.Module):
         x2 = output["x2"]
         x1 = output["x1"]
 
-        score = self.deconv1(x5, temperature=temperature, hard=hard)
-        score = self.skip1(score, x4, temperature=temperature, hard=hard)
-        score = self.deconv2(score, temperature=temperature, hard=hard)
-        score = self.skip2(score, x3, temperature=temperature, hard=hard)
-        score = self.deconv3(score, temperature=temperature, hard=hard)
-        score = self.skip3(score, x2, temperature=temperature, hard=hard)
-        score = self.deconv4(score, temperature=temperature, hard=hard)
-        score = self.skip4(score, x1, temperature=temperature, hard=hard)
-        score = self.deconv5(score, temperature=temperature, hard=hard)
+        sp = self.single_path_training and self.training
+
+        score = self.deconv1(x5, temperature=temperature, hard=hard, single_path=sp)
+        score = self.skip1(score, x4, temperature=temperature, hard=hard, single_path=sp)
+        score = self.deconv2(score, temperature=temperature, hard=hard, single_path=sp)
+        score = self.skip2(score, x3, temperature=temperature, hard=hard, single_path=sp)
+        score = self.deconv3(score, temperature=temperature, hard=hard, single_path=sp)
+        score = self.skip3(score, x2, temperature=temperature, hard=hard, single_path=sp)
+        score = self.deconv4(score, temperature=temperature, hard=hard, single_path=sp)
+        score = self.skip4(score, x1, temperature=temperature, hard=hard, single_path=sp)
+        score = self.deconv5(score, temperature=temperature, hard=hard, single_path=sp)
         score = self.classifier(score)
 
         return score
