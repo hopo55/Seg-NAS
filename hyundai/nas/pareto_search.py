@@ -551,14 +551,16 @@ class ParetoSearcher:
         population = self._rank_population(eval_archs)[:population_size]
         seen = {self._arch_key(a) for a in population}
 
-        print(f"Evolutionary refinement: population={population_size}, generations={generations}")
-        for gen in range(int(max(1, generations))):
+        total_gens = int(max(1, generations))
+        print(f"Evolutionary refinement: population={population_size}, generations={total_gens}")
+        for gen in range(total_gens):
             ranked = self._rank_population(population)
             parent_pool = ranked[:max(2, min(len(ranked), population_size // 2))]
 
             children = []
             attempts = 0
             max_attempts = population_size * 30
+            pbar = tqdm(total=population_size, desc=f"  Gen {gen+1}/{total_gens}", leave=False)
             while len(children) < population_size and attempts < max_attempts:
                 attempts += 1
                 pa = parent_pool[np.random.randint(0, len(parent_pool))]
@@ -576,11 +578,14 @@ class ParetoSearcher:
                 child.accuracy = self.evaluate_architecture(child, val_loader, device)
                 children.append(child)
                 seen.add(k)
+                pbar.update(1)
+                pbar.set_postfix(acc=f"{child.accuracy:.4f}", feasible=child.feasible)
+            pbar.close()
 
             population = self._rank_population(population + children)[:population_size]
             feasible_count = sum(1 for a in population if a.feasible)
             best_acc = max((a.accuracy for a in population), default=0.0)
-            print(f"  Gen {gen+1}/{generations}: feasible={feasible_count}/{len(population)}, best_acc={best_acc:.4f}")
+            print(f"  Gen {gen+1}/{total_gens}: feasible={feasible_count}/{len(population)}, best_acc={best_acc:.4f}")
 
         self.architectures = population
 

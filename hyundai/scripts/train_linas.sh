@@ -59,7 +59,7 @@ EPOCHS=2
 
 # Encoder backbone
 #   - densenet121, resnet50, efficientnet_b0, mobilenet_v3_large
-ENCODER='resnet50'
+ENCODER='mobilenet_v3_large'
 
 # Search Space
 #   - extended: standard 5 ops x 3 widths

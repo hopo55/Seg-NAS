@@ -776,7 +776,11 @@ def discover_pareto_architectures(args, model, dataset):
         print(f"Refinement: evaluating top-{refine_topk} Pareto candidates as extracted subnets")
 
     selected_archs = {}
-    for hw, target_lat in hardware_targets.items():
+    hw_list = [hw for hw in hardware_targets if hw in luts]
+    print(f"Selecting best architecture for {len(hw_list)} hardware targets...")
+    for hw_idx, hw in enumerate(hw_list, 1):
+        target_lat = hardware_targets[hw]
+        print(f"\n[{hw_idx}/{len(hw_list)}] Evaluating {hw} (target: {target_lat}ms)...")
         if hw in luts:
             if search_backend == 'calofa' and getattr(searcher, 'feasible_front', None):
                 pareto_candidates = list(searcher.feasible_front.get(hw, []))
@@ -796,7 +800,9 @@ def discover_pareto_architectures(args, model, dataset):
 
             arch = None
             best_refined = -float('inf')
-            for cand in shortlist:
+            for cand_idx, cand in enumerate(shortlist, 1):
+                if len(shortlist) > 1:
+                    print(f"    Refining candidate {cand_idx}/{len(shortlist)}...")
                 refined_val_iou = _evaluate_extracted_subnet(model, cand, val_loader, device)
                 if refined_val_iou > best_refined:
                     best_refined = refined_val_iou

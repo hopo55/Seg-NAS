@@ -10,30 +10,54 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass
 
 from utils.utils import AverageMeter, get_iou_score
-import copy
-
-
 class EMATeacher:
-    """Exponential Moving Average teacher for self-distillation (SD-DARTS)."""
+    """Memory-efficient EMA teacher for self-distillation (SD-DARTS).
+
+    Stores shadow weights on CPU (zero GPU overhead).
+    Uses weight-swap approach for forward: temporarily loads EMA weights
+    into the main model, so single-path mode and gradient checkpointing
+    are automatically inherited.
+    """
 
     def __init__(self, model, decay=0.999):
         self.decay = decay
         module = model.module if hasattr(model, 'module') else model
-        self.shadow = copy.deepcopy(module)
-        self.shadow.eval()
-        for p in self.shadow.parameters():
-            p.requires_grad_(False)
+        # Store EMA weights on CPU to save GPU memory
+        self.shadow = {k: v.detach().cpu().clone() for k, v in module.state_dict().items()}
 
     @torch.no_grad()
     def update(self, model):
         module = model.module if hasattr(model, 'module') else model
-        for ema_p, model_p in zip(self.shadow.parameters(), module.parameters()):
-            ema_p.mul_(self.decay).add_(model_p.detach(), alpha=1 - self.decay)
+        for k, v in module.state_dict().items():
+            if k in self.shadow:
+                if self.shadow[k].is_floating_point():
+                    self.shadow[k].mul_(self.decay).add_(v.detach().cpu(), alpha=1 - self.decay)
+                else:
+                    self.shadow[k].copy_(v.detach().cpu())
 
     @torch.no_grad()
-    def forward(self, x, temperature=1.0, hard=False):
-        self.shadow.eval()
-        return self.shadow(x, temperature=temperature, hard=hard)
+    def forward(self, model, x, temperature=1.0, hard=False):
+        """Forward through main model with EMA weights (weight-swap)."""
+        module = model.module if hasattr(model, 'module') else model
+        device = next(module.parameters()).device
+
+        # Backup original weights to CPU
+        backup = {k: v.detach().cpu() for k, v in module.state_dict().items()}
+
+        # Load EMA weights to model (on GPU)
+        module.load_state_dict({k: v.to(device) for k, v in self.shadow.items()})
+
+        was_training = module.training
+        module.eval()
+        output = module(x, temperature=temperature, hard=hard)
+
+        # Restore original weights
+        module.load_state_dict({k: v.to(device) for k, v in backup.items()})
+        if was_training:
+            module.train()
+        del backup
+
+        return output
 
 
 def _amp_autocast(use_amp):
@@ -1202,7 +1226,7 @@ def train_weight_alpha_with_latency_ps(
             sd_alpha_val = float(getattr(args, 'sd_alpha', 0.3))
             if ema_teacher is not None:
                 with torch.no_grad(), _amp_autocast(use_amp):
-                    ema_output = ema_teacher.forward(data, temperature=current_temp, hard=hard_mode)
+                    ema_output = ema_teacher.forward(model, data, temperature=current_temp, hard=hard_mode)
 
             # Proposal 6: CaLR settings
             use_calr = getattr(args, 'use_calr', False)
