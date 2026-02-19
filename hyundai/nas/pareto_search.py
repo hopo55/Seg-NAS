@@ -167,6 +167,18 @@ class ParetoSearcher:
             op_probs = F.softmax(op_weights * 2, dim=-1).detach().cpu().numpy()  # Temperature 0.5
             width_probs = F.softmax(width_weights * 2, dim=-1).detach().cpu().numpy()
 
+            # Replace NaN rows with uniform distribution
+            for l in range(op_probs.shape[0]):
+                if np.any(np.isnan(op_probs[l])):
+                    op_probs[l] = np.ones(self.num_ops) / self.num_ops
+                else:
+                    op_probs[l] = op_probs[l] / op_probs[l].sum()  # renormalize for fp precision
+            for l in range(width_probs.shape[0]):
+                if np.any(np.isnan(width_probs[l])):
+                    width_probs[l] = np.ones(self.num_widths) / self.num_widths
+                else:
+                    width_probs[l] = width_probs[l] / width_probs[l].sum()
+
             op_indices = []
             width_indices = []
             for l in range(self.num_layers):

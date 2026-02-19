@@ -1,6 +1,6 @@
 import argparse
 
-DEFAULT_BASELINE_MODELS = ['autopatch', 'realtimeseg', 'unet', 'deeplabv3plus']
+DEFAULT_BASELINE_MODELS = ['unet', 'deeplabv3plus']
 
 def add_comparison_args(parser):
     """Register CLI arguments for baseline comparison experiments."""

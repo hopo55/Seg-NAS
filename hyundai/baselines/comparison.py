@@ -1,6 +1,5 @@
 """
 Comparison module for training baseline models on Hyundai dataset.
-Compares AutoPatch-style, RealtimeSeg-style, and other baseline models.
 """
 
 import copy
@@ -29,7 +28,7 @@ def train_baseline(model, train_loader, loss_fn, optimizer):
 
         optimizer.zero_grad()
         outputs = model(data)
-        loss_value = loss_fn(outputs, labels)
+        loss_value = loss_fn(outputs, labels.argmax(dim=1))
         train_loss.update(loss_value.item(), batch_size)
 
         loss_value.backward()
@@ -114,7 +113,7 @@ def train_single_baseline(args, model_name, dataset):
 
     # Loss and optimizer
     loss_fn = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.opt_lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.opt_lr, capturable=True)
 
     # Training loop
     best_model = None

@@ -1,6 +1,7 @@
 import warnings
 from datetime import datetime
 
+import torch
 import wandb
 
 from baselines.comparison import run_comparison
@@ -18,6 +19,12 @@ def main():
 
     args = get_args(include_comparison_args=True)
     set_seed(args.seed)
+    # set_seed disables cuDNN to work around AMP+non-square resolution issues in NAS
+    # training, but comparison uses plain fp32 with no AMP — re-enable so standard
+    # cuDNN kernels are used instead of the fallback ATen kernels that cause SIGFPE
+    # when processing large (480×640) tensors with DataParallel.
+    torch.backends.cudnn.enabled = True
+    torch.backends.cudnn.deterministic = False  # deterministic=True triggers cuDNN internal graph capture
 
     data_name = args.data if isinstance(args.data, str) else "_".join(args.data)
     timestamp = str(datetime.now().date()) + "_" + datetime.now().strftime("%H_%M_%S")
@@ -26,6 +33,7 @@ def main():
     run_name = f"hyundai_comparison_seed{args.seed}"
     wandb_config = vars(args).copy()
     wandb_config["mode"] = "comparison"
+    wandb_config["encoder_name"] = ",".join(args.baseline_models)
     wandb.init(config=wandb_config, project="Seg-NAS", entity="hopo55", name=run_name)
 
     dataset = get_dataset(args)
