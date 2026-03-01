@@ -11,9 +11,12 @@ from tqdm import tqdm
 from torch.utils.data import ConcatDataset, DataLoader
 
 from .models import MODEL_INFO, get_baseline_model
-from utils.utils import AverageMeter, get_iou_score, set_device, get_model_complexity, measure_inference_time
+from utils.utils import (AverageMeter, get_iou_score, set_device, get_model_complexity,
+                         measure_inference_time, eval_metrics_on_loader, format_metrics,
+                         ANOMALY_PROFILES)
 from utils.dataloaders import set_transforms, ImageDataset
 from utils.car_names import to_english_car_name
+from utils.input_size import get_resize_hw
 
 def train_baseline(model, train_loader, loss_fn, optimizer):
     """Train baseline model for one epoch."""
@@ -28,7 +31,8 @@ def train_baseline(model, train_loader, loss_fn, optimizer):
 
         optimizer.zero_grad()
         outputs = model(data)
-        loss_value = loss_fn(outputs, labels.argmax(dim=1))
+        targets = labels.argmax(dim=1) if labels.dim() == outputs.dim() else labels.long()
+        loss_value = loss_fn(outputs, targets)
         train_loss.update(loss_value.item(), batch_size)
 
         loss_value.backward()
@@ -45,19 +49,13 @@ def train_baseline(model, train_loader, loss_fn, optimizer):
     return train_loss.avg, train_iou.avg
 
 
-def test_baseline(model, test_loader):
-    """Test baseline model."""
-    model.eval()
-    test_iou = AverageMeter()
-
-    with torch.no_grad():
-        for data, labels in test_loader:
-            data, labels = data.cuda(), labels.cuda()
-            batch_size = data.size(0)
-            outputs = model(data)
-            test_iou.update(get_iou_score(outputs, labels), batch_size)
-
-    return test_iou.avg
+def test_baseline(model, test_loader, dataset_profile='hyundai', num_classes=2):
+    """Test baseline model. Returns a metrics dict with miou, f1, and auroc (anomaly)."""
+    return eval_metrics_on_loader(
+        model, test_loader,
+        dataset_profile=dataset_profile,
+        num_classes=num_classes,
+    )
 
 
 def train_single_baseline(args, model_name, dataset):
@@ -75,7 +73,8 @@ def train_single_baseline(args, model_name, dataset):
     device = set_device(args.gpu_idx)
 
     # Create model
-    model = get_baseline_model(model_name, n_class=2)
+    num_classes = int(getattr(args, 'num_classes', 2))
+    model = get_baseline_model(model_name, n_class=num_classes)
     num_gpus = len(args.gpu_idx)
     use_data_parallel = num_gpus >= 2
     if use_data_parallel and args.train_size // num_gpus < 2:
@@ -91,8 +90,9 @@ def train_single_baseline(args, model_name, dataset):
         model.to(device)
 
     # Measure FLOPs and Parameters
+    resize_h, resize_w = get_resize_hw(args)
     gflops, params_m = get_model_complexity(
-        model, input_size=(1, 3, args.resize, args.resize), device=device
+        model, input_size=(1, 3, resize_h, resize_w), device=device
     )
     print(f"\n{MODEL_INFO[model_name]['name']}")
     print(f"  FLOPs: {gflops:.4f} GFLOPs, Parameters: {params_m:.4f} M")
@@ -115,43 +115,54 @@ def train_single_baseline(args, model_name, dataset):
     loss_fn = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.opt_lr, capturable=True)
 
+    dataset_profile = getattr(args, 'dataset_profile', 'hyundai')
+
     # Training loop
     best_model = None
+    best_test_metrics = None
     best_test_iou = -float('inf')
 
     print(f"\nTraining {model_name}...")
     for epoch in range(args.epochs):
         train_loss, train_iou = train_baseline(model, train_loader, loss_fn, optimizer)
-        test_iou = test_baseline(model, test_loader)
+        test_metrics = test_baseline(model, test_loader,
+                                     dataset_profile=dataset_profile,
+                                     num_classes=num_classes)
+        test_iou = test_metrics['miou']
 
         if test_iou > best_test_iou:
             best_test_iou = test_iou
+            best_test_metrics = test_metrics
             best_model = copy.deepcopy(model)
 
         print(f"Epoch {epoch+1}/{args.epochs}, Train Loss: {train_loss:.4f}, "
-              f"Train mIoU: {train_iou:.4f}, Test mIoU: {test_iou:.4f}")
+              f"Train mIoU: {train_iou:.4f}, Test [{format_metrics(test_metrics)}]")
 
     # Measure inference time (paper-style: warmup + multiple runs)
     mean_time, std_time = measure_inference_time(
         best_model,
-        input_size=(1, 3, args.resize, args.resize),
+        input_size=(1, 3, resize_h, resize_w),
         device=device,
         num_warmup=50,
         num_runs=100
     )
 
     # Log best results
-    wandb.log({
+    log_dict = {
         'Best_mIoU': best_test_iou,
+        'Best_F1':   best_test_metrics.get('f1', float('nan')),
         'FLOPs (GFLOPs)': gflops,
         'Parameters (M)': params_m,
         'Inference_Time_Mean (ms)': mean_time,
         'Inference_Time_Std (ms)': std_time,
-    })
+    }
+    if 'auroc' in best_test_metrics:
+        log_dict['Best_AUROC'] = best_test_metrics['auroc']
+    wandb.log(log_dict)
     print(f"  Inference Time: {mean_time:.4f} ± {std_time:.4f} ms (batch=1)")
 
     # Test on individual car models
-    if args.mode != 'ind' and test_ind_data:
+    if getattr(args, 'dataset_profile', 'hyundai') == 'hyundai' and args.mode != 'ind' and test_ind_data:
         names = ["CE", "DF", "GN7 일반", "GN7 파노라마"]
         label_dir_name = getattr(args, 'label_dir_name', 'target')
         source_dir_name = os.path.basename(os.path.normpath(args.data_dir))
@@ -181,12 +192,13 @@ def train_single_baseline(args, model_name, dataset):
                 print(f"  {eng_name}: mIoU={test_ind_iou:.4f}")
 
     return {
-        'model_name': model_name,
-        'best_iou': best_test_iou,
-        'flops': gflops,
-        'params': params_m,
+        'model_name':     model_name,
+        'best_metrics':   best_test_metrics,
+        'best_iou':       best_test_iou,
+        'flops':          gflops,
+        'params':         params_m,
         'inference_time': mean_time,
-        'inference_std': std_time,
+        'inference_std':  std_time,
     }
 
 
@@ -221,22 +233,32 @@ def run_comparison(args, dataset):
     print("Comparison Results Summary")
     print("=" * 60)
 
-    comparison_table = wandb.Table(
-        columns=["Model", "Best mIoU", "FLOPs (GFLOPs)", "Parameters (M)", "Inference (ms)"]
-    )
+    dataset_profile = getattr(args, 'dataset_profile', 'hyundai')
+    has_auroc = dataset_profile in ANOMALY_PROFILES
+    columns = ["Model", "mIoU", "F1"]
+    if has_auroc:
+        columns.append("AUROC")
+    columns += ["FLOPs (GFLOPs)", "Parameters (M)", "Inference (ms)"]
+    comparison_table = wandb.Table(columns=columns)
 
     for r in results:
-        comparison_table.add_data(
+        m = r['best_metrics'] or {}
+        row = [
             MODEL_INFO[r['model_name']]['name'],
-            r['best_iou'],
-            r['flops'],
-            r['params'],
-            f"{r['inference_time']:.2f}±{r['inference_std']:.2f}"
-        )
+            round(m.get('miou', r['best_iou']), 4),
+            round(m.get('f1', float('nan')), 4),
+        ]
+        if has_auroc:
+            row.append(round(m.get('auroc', float('nan')), 4))
+        row += [r['flops'], r['params'], f"{r['inference_time']:.2f}±{r['inference_std']:.2f}"]
+        comparison_table.add_data(*row)
+
+        metrics_str = format_metrics(m) if m else f"mIoU: {r['best_iou']:.4f}"
         print(f"{MODEL_INFO[r['model_name']]['name']:40s} | "
-              f"mIoU: {r['best_iou']:.4f} | "
+              f"{metrics_str} | "
               f"FLOPs: {r['flops']:.4f} | "
               f"Params: {r['params']:.4f} | "
               f"Time: {r['inference_time']:.2f}±{r['inference_std']:.2f}ms")
 
+    wandb.log({"Comparison Table": comparison_table})
     return results

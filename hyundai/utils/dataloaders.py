@@ -14,6 +14,11 @@ from torch.utils.data import Dataset
 from utils.input_size import get_resize_hw
 
 # matplotlib.use('Agg')
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
+
+
+def _is_image_filename(filename: str) -> bool:
+    return filename.lower().endswith(IMAGE_EXTS)
 
 
 def _replace_dir_component(path, src_name, dst_name):
@@ -219,15 +224,15 @@ def load_folder_model(data_dir, ratios, names, train_val_split=0.8):
 
 # Split data into train, validation, and test sets based on all image files.
 def load_image(data_dir, ratios):
-    jpg_files = []
+    image_files = []
     for root, _, files in os.walk(data_dir):
         for file in files:
-            if file.endswith('.jpg'):
-                jpg_files.append(os.path.join(root, file))
+            if _is_image_filename(file):
+                image_files.append(os.path.join(root, file))
 
-    random.shuffle(jpg_files)
+    random.shuffle(image_files)
 
-    temp_files, test_files = train_test_split(jpg_files, test_size=ratios)
+    temp_files, test_files = train_test_split(image_files, test_size=ratios)
     train_files, valid_files = train_test_split(temp_files, test_size=0.5)
 
     names = ["CE", "DF", "GN7 일반", "GN7 파노라마"]
@@ -295,7 +300,7 @@ class ImageDataset(Dataset):
             # # if use all image files
             # self.data.append(folder)
             for file in os.listdir(folder):
-                if file.endswith(".jpg"):
+                if _is_image_filename(file):
                     self.data.append(os.path.join(folder, file))
 
     def __len__(self):
@@ -361,7 +366,7 @@ class HotDataset(Dataset):
 
         for folder in self.data_dir:
             for file in os.listdir(folder):
-                if file.endswith(".jpg"):
+                if _is_image_filename(file):
                     car_model = self.get_car_model_from_folder(folder)
                     if car_model in ranges:
                         for start, end in ranges[car_model]:

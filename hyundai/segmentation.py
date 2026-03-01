@@ -116,7 +116,8 @@ def search_architecture(args, dataset):
     encoder_name = getattr(args, 'encoder_name', 'densenet121')
     grad_ckpt = getattr(args, 'gradient_checkpointing', False)
     sp_train = getattr(args, 'single_path_training', False)
-    model = SuperNet(n_class=2, search_space=search_space, encoder_name=encoder_name,
+    num_classes = int(getattr(args, 'num_classes', 2))
+    model = SuperNet(n_class=num_classes, search_space=search_space, encoder_name=encoder_name,
                      gradient_checkpointing=grad_ckpt, single_path_training=sp_train)
     op_names, width_mults = _describe_search_space(search_space)
     print(f"Encoder: {encoder_name}")
@@ -155,7 +156,7 @@ def search_architecture(args, dataset):
         else:
             print("Using CPU")
 
-    loss = get_loss_function(getattr(args, 'loss_type', 'ce'))
+    loss = get_loss_function(getattr(args, 'loss_type', 'ce'), num_classes=getattr(args, 'num_classes', 2))
 
     # Get alpha parameters (handles both basic and extended search spaces)
     alphas_params = [
@@ -171,8 +172,12 @@ def search_architecture(args, dataset):
     optimizer_weight = torch.optim.Adam(weight_params, lr=args.weight_lr)
 
     data_name = args.data if isinstance(args.data, str) else "_".join(args.data)
+    dataset_profile = getattr(args, 'dataset_profile', 'hyundai')
     timestamp = str(datetime.now().date()) + "_" + datetime.now().strftime("%H_%M_%S")
-    args.save_dir = f"./hyundai/checkpoints/{args.mode}_{data_name}_seed{args.seed}_lambda{args.flops_lambda}_{search_space}/{timestamp}/"
+    args.save_dir = (
+        f"./hyundai/checkpoints/{args.mode}_{dataset_profile}_{data_name}_seed{args.seed}_"
+        f"lambda{args.flops_lambda}_{search_space}/{timestamp}/"
+    )
 
     train_architecture(
         args,
@@ -204,7 +209,8 @@ def search_architecture_linas(args, dataset):
     encoder_name = getattr(args, 'encoder_name', 'densenet121')
     grad_ckpt = getattr(args, 'gradient_checkpointing', False)
     sp_train = getattr(args, 'single_path_training', False)
-    model = SuperNet(n_class=2, search_space=search_space, encoder_name=encoder_name,
+    num_classes = int(getattr(args, 'num_classes', 2))
+    model = SuperNet(n_class=num_classes, search_space=search_space, encoder_name=encoder_name,
                      gradient_checkpointing=grad_ckpt, single_path_training=sp_train)
     op_names, width_mults = _describe_search_space(search_space)
     print(f"Encoder: {encoder_name}")
@@ -240,7 +246,7 @@ def search_architecture_linas(args, dataset):
         else:
             print("Using CPU")
 
-    loss = get_loss_function(getattr(args, 'loss_type', 'ce'))
+    loss = get_loss_function(getattr(args, 'loss_type', 'ce'), num_classes=getattr(args, 'num_classes', 2))
 
     # Get alpha and weight parameters
     alphas_params = [
@@ -257,9 +263,13 @@ def search_architecture_linas(args, dataset):
 
     # Setup save directory
     data_name = args.data if isinstance(args.data, str) else "_".join(args.data)
+    dataset_profile = getattr(args, 'dataset_profile', 'hyundai')
     timestamp = str(datetime.now().date()) + "_" + datetime.now().strftime("%H_%M_%S")
     target_lat = getattr(args, 'target_latency', None) or 'min'
-    args.save_dir = f"./hyundai/checkpoints/linas_{data_name}_seed{args.seed}_lat{target_lat}_lambda{args.latency_lambda}/{timestamp}/"
+    args.save_dir = (
+        f"./hyundai/checkpoints/linas_{dataset_profile}_{data_name}_seed{args.seed}_"
+        f"lat{target_lat}_lambda{args.latency_lambda}/{timestamp}/"
+    )
 
     # Load latency predictor or LUT
     latency_predictor = None
@@ -365,7 +375,8 @@ def search_architecture_linas_ps(args, dataset):
     encoder_name = getattr(args, 'encoder_name', 'densenet121')
     grad_ckpt = getattr(args, 'gradient_checkpointing', False)
     sp_train = getattr(args, 'single_path_training', False)
-    model = SuperNet(n_class=2, search_space=search_space, encoder_name=encoder_name,
+    num_classes = int(getattr(args, 'num_classes', 2))
+    model = SuperNet(n_class=num_classes, search_space=search_space, encoder_name=encoder_name,
                      gradient_checkpointing=grad_ckpt, single_path_training=sp_train)
     op_names, width_mults = _describe_search_space(search_space)
     print(f"Encoder: {encoder_name}")
@@ -398,7 +409,7 @@ def search_architecture_linas_ps(args, dataset):
         else:
             print("Using CPU")
 
-    loss = get_loss_function(getattr(args, 'loss_type', 'ce'))
+    loss = get_loss_function(getattr(args, 'loss_type', 'ce'), num_classes=getattr(args, 'num_classes', 2))
 
     alphas_params = [
         param for name, param in model.named_parameters() if "alpha" in name.lower()
@@ -412,9 +423,13 @@ def search_architecture_linas_ps(args, dataset):
     optimizer_weight = torch.optim.Adam(weight_params, lr=args.weight_lr)
 
     data_name = args.data if isinstance(args.data, str) else "_".join(args.data)
+    dataset_profile = getattr(args, 'dataset_profile', 'hyundai')
     timestamp = str(datetime.now().date()) + "_" + datetime.now().strftime("%H_%M_%S")
     target_lat = getattr(args, 'target_latency', None) or 'min'
-    args.save_dir = f"./hyundai/checkpoints/linas_ps_{data_name}_seed{args.seed}_lat{target_lat}_lambda{args.latency_lambda}/{timestamp}/"
+    args.save_dir = (
+        f"./hyundai/checkpoints/linas_ps_{dataset_profile}_{data_name}_seed{args.seed}_"
+        f"lat{target_lat}_lambda{args.latency_lambda}/{timestamp}/"
+    )
 
     # Load latency info (same logic as search_architecture_linas)
     latency_predictor = None
@@ -599,7 +614,7 @@ def train_searched_model(args, opt_model, dataset):
         wandb.run.summary['Model/Final FLOPs (GFLOPs)'] = gflops
         wandb.run.summary['Model/Final Parameters (M)'] = params_m
 
-    loss = get_loss_function(getattr(args, 'loss_type', 'ce'))
+    loss = get_loss_function(getattr(args, 'loss_type', 'ce'), num_classes=getattr(args, 'num_classes', 2))
     optimizer = torch.optim.Adam(opt_model.parameters(), lr=args.opt_lr)
 
     train_samplenet(args,

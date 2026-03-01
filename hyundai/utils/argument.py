@@ -2,6 +2,16 @@ import argparse
 
 DEFAULT_BASELINE_MODELS = ['unet', 'deeplabv3plus']
 
+# Standard input resolution per public dataset profile.
+# Applied automatically when --resize_h / --resize_w are not explicitly set.
+DATASET_STANDARD_CONFIGS = {
+    'cityscapes': {'resize_h': 512,  'resize_w': 1024},
+    'ade20k':     {'resize_h': 512,  'resize_w': 512},
+    'mvtec_ad':   {'resize_h': 256,  'resize_w': 256},
+    'mvtec_loco': {'resize_h': 256,  'resize_w': 256},
+    'visa':       {'resize_h': 256,  'resize_w': 256},
+}
+
 def add_comparison_args(parser):
     """Register CLI arguments for baseline comparison experiments."""
     parser.add_argument('--baseline_models', type=str, nargs='+',
@@ -22,13 +32,32 @@ def get_args(include_comparison_args=False):
                             '(zero): training for zero-shot testing\n'
                             '(hot): train and test a model on the hot-stamping dataset\n'
                             '(pareto): RF-DETR style Pareto-based NAS')
+    parser.add_argument(
+        '--dataset_profile',
+        type=str,
+        default='hyundai',
+        choices=['hyundai', 'cityscapes', 'ade20k', 'mvtec_ad', 'visa', 'mvtec_loco'],
+        help='Dataset profile. hyundai keeps legacy loader; others use public dataset loaders.',
+    )
     parser.add_argument('--data', type=str, default=['all'], nargs='+', 
                         choices=['all', 'ce', 'df', 'gn7norm', 'gn7pano'],
                         help='select one or more datasets')
     parser.add_argument('--data_dir', type=str, default='./dataset/image', 
-                        help='select one or more datasets')
+                        help='Dataset root directory')
     parser.add_argument('--label_dir_name', type=str, default='target',
                         help='Label directory name paired with data_dir (e.g., target, target_ori).')
+    parser.add_argument('--num_classes', type=int, default=None,
+                        help='Number of segmentation classes. If omitted, inferred from dataset profile.')
+    parser.add_argument('--public_categories', type=str, nargs='*', default=None,
+                        help='Optional category subset for public industrial datasets (e.g., bottle cable).')
+    parser.add_argument('--public_val_holdout', type=float, default=0.5,
+                        help='Holdout ratio from validation split to build test set when no labeled test split exists.')
+    parser.add_argument('--public_manifest', type=str, default=None,
+                        help='Optional CSV manifest path for datasets like VisA (if automatic discovery fails).')
+    parser.add_argument('--public_max_samples', type=int, default=None,
+                        help='Optional max number of samples per split for quick smoke tests.')
+    parser.add_argument('--public_use_augmentation', action='store_true',
+                        help='Enable simple geometric augmentation for public dataset train split.')
     parser.add_argument('--resize', type=int, default=128,
                         help='Resize dimension as a single integer (e.g., 128).')
     parser.add_argument('--resize_h', type=int, default=None,
@@ -198,6 +227,26 @@ def get_args(include_comparison_args=False):
         hotstamping_args(parser)
 
     args = parser.parse_args()
+
+    if args.num_classes is None:
+        profile_default_classes = {
+            'hyundai': 2,
+            'cityscapes': 19,
+            'ade20k': 151,
+            'mvtec_ad': 2,
+            'visa': 2,
+            'mvtec_loco': 2,
+        }
+        args.num_classes = profile_default_classes.get(args.dataset_profile, 2)
+
+    # Apply per-profile standard resize when not explicitly provided.
+    if args.resize_h is None and args.resize_w is None:
+        cfg = DATASET_STANDARD_CONFIGS.get(args.dataset_profile)
+        if cfg is not None:
+            args.resize_h = cfg['resize_h']
+            args.resize_w = cfg['resize_w']
+            print(f"[Dataset config] {args.dataset_profile}: "
+                  f"resize set to {args.resize_h}x{args.resize_w}")
 
     return args
 

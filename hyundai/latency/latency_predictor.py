@@ -16,6 +16,13 @@ from .hardware_encoder import HardwareEncoder, get_hardware_features
 from .lut_builder import HARDWARE_SPECS
 
 
+# SE ops are not yet in the LUT files; fall back to the equivalent non-SE op.
+_OP_FALLBACKS: Dict[str, str] = {
+    'Conv3x3_SE': 'Conv3x3',
+    'DWSep3x3_SE': 'DWSep3x3',
+}
+
+
 class LatencyLUT:
     """
     Latency Look-Up Table for direct latency estimation.
@@ -59,7 +66,18 @@ class LatencyLUT:
         try:
             return self.lut['layers'][layer_key]['ops'][op_key]['mean_ms']
         except KeyError:
-            raise KeyError(f"Operation {op_key} not found in layer {layer_idx}")
+            pass
+
+        # Try fallback op (e.g. Conv3x3_SE → Conv3x3)
+        fallback_op = _OP_FALLBACKS.get(op_name)
+        if fallback_op is not None:
+            fallback_key = f"{fallback_op}_w{int(width_mult * 100)}"
+            try:
+                return self.lut['layers'][layer_key]['ops'][fallback_key]['mean_ms']
+            except KeyError:
+                pass
+
+        raise KeyError(f"Operation {op_key} not found in layer {layer_idx}")
 
     def get_architecture_latency(self, op_indices: List[int],
                                    width_indices: List[int],

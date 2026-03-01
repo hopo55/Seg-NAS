@@ -417,8 +417,8 @@ STANDARD_OP_NAMES = ['Conv3x3', 'Conv5x5', 'Conv7x7', 'DWSep3x3', 'DWSep5x5']
 INDUSTRY_OP_NAMES = ['EdgeConv', 'DilatedDWSep', 'Conv3x3_SE', 'DWSep3x3_SE']
 ALL_OP_NAMES = STANDARD_OP_NAMES + INDUSTRY_OP_NAMES
 
-# Width multipliers
-WIDTH_MULTS = [0.25, 0.5, 0.75, 1.0, 1.25]
+# Width multipliers — must match widths present in LUT JSON files (w50, w75, w100)
+WIDTH_MULTS = [0.5, 0.75, 1.0]
 
 
 def get_operation(op_name: str, C_in: int, C_out: int,

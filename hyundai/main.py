@@ -35,6 +35,7 @@ def main():
     set_seed(args.seed)
 
     data_name = args.data if isinstance(args.data, str) else "_".join(args.data)
+    dataset_profile = getattr(args, 'dataset_profile', 'hyundai')
     timestamp = str(datetime.now().date()) + "_" + datetime.now().strftime("%H_%M_%S")
     search_space = getattr(args, 'search_space', 'basic')
 
@@ -50,10 +51,16 @@ def main():
         lambda_val = args.flops_lambda
 
     encoder_name = getattr(args, 'encoder_name', 'densenet121')
-    args.log_dir = f"./hyundai/logs/{args.mode}_{data_name}_seed{args.seed}_{opt_mode}{target_val}_lambda{lambda_val}_{search_space}_{encoder_name}/{timestamp}/"
+    args.log_dir = (
+        f"./hyundai/logs/{args.mode}_{dataset_profile}_{data_name}_seed{args.seed}_"
+        f"{opt_mode}{target_val}_lambda{lambda_val}_{search_space}_{encoder_name}/{timestamp}/"
+    )
 
     # Include optimization mode in run name
-    run_name = f"hyundai_seed{args.seed}_{opt_mode}_λ{lambda_val}_{search_space}_{encoder_name}"
+    run_name = (
+        f"hyundai_{dataset_profile}_seed{args.seed}_{opt_mode}_λ{lambda_val}_"
+        f"{search_space}_{encoder_name}"
+    )
 
     # Initialize wandb only on rank 0
     if not hasattr(args, 'rank') or args.rank == 0:

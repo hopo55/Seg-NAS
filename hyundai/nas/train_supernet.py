@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 
-from utils.utils import AverageMeter, get_iou_score
+from utils.utils import AverageMeter, get_iou_score, eval_metrics_on_loader, format_metrics
 class EMATeacher:
     """Memory-efficient EMA teacher for self-distillation (SD-DARTS).
 
@@ -884,8 +884,15 @@ def train_architecture_with_latency(
         state_dict = torch.load(best_path, map_location=next(model_to_load.parameters()).device)
         model_to_load.load_state_dict(state_dict)
 
-    final_test_iou = test_architecture(model, test_loader, desc="Final Test", use_amp=use_amp)
-    print(f"[Final Test] mIoU: {final_test_iou:.4f}")
+    dataset_profile = getattr(args, 'dataset_profile', 'hyundai')
+    num_classes = int(getattr(args, 'num_classes', 2))
+    final_metrics = eval_metrics_on_loader(
+        model, test_loader,
+        dataset_profile=dataset_profile,
+        num_classes=num_classes,
+        use_amp=use_amp,
+    )
+    print(f"[Final Test] {format_metrics(final_metrics)}")
 
 
 # test search architecture
@@ -1096,8 +1103,15 @@ def train_architecture(
         state_dict = torch.load(best_path, map_location=next(model_to_load.parameters()).device)
         model_to_load.load_state_dict(state_dict)
 
-    final_test_iou = test_architecture(model, test_loader, desc="Final Test", use_amp=use_amp)
-    print(f"[Final Test] mIoU: {final_test_iou:.4f}")
+    dataset_profile = getattr(args, 'dataset_profile', 'hyundai')
+    num_classes = int(getattr(args, 'num_classes', 2))
+    final_metrics = eval_metrics_on_loader(
+        model, test_loader,
+        dataset_profile=dataset_profile,
+        num_classes=num_classes,
+        use_amp=use_amp,
+    )
+    print(f"[Final Test] {format_metrics(final_metrics)}")
 
 
 # ============================================================================
@@ -1613,5 +1627,12 @@ def train_architecture_with_latency_ps(
     # Ensure all widths are active for final evaluation
     module.set_active_widths(list(range(len(module.width_mults))))
 
-    final_test_iou = test_architecture(model, test_loader, desc="Final Test", use_amp=use_amp)
-    print(f"[Final Test] mIoU: {final_test_iou:.4f}")
+    dataset_profile = getattr(args, 'dataset_profile', 'hyundai')
+    num_classes = int(getattr(args, 'num_classes', 2))
+    final_metrics = eval_metrics_on_loader(
+        model, test_loader,
+        dataset_profile=dataset_profile,
+        num_classes=num_classes,
+        use_amp=use_amp,
+    )
+    print(f"[Final Test] {format_metrics(final_metrics)}")

@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from utils.dataloaders import set_transforms, ImageDataset
 
-from utils.utils import AverageMeter, get_iou_score, measure_inference_time, set_device
+from utils.utils import AverageMeter, get_iou_score, eval_metrics_on_loader, format_metrics, measure_inference_time, set_device
 from utils.car_names import to_english_car_name
 from utils.input_size import get_resize_hw
 
@@ -236,13 +236,21 @@ def train_samplenet(
         model_to_load = model.module if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)) else model
         model_to_load.load_state_dict(best_model_state)
 
-    final_test_iou = test_opt(model, test_loader)
-    print(f"[Final Test] IoU: {final_test_iou:.4f}")
+    dataset_profile = getattr(args, 'dataset_profile', 'hyundai')
+    num_classes = int(getattr(args, 'num_classes', 2))
+    use_amp = getattr(args, 'retrain_use_amp', False)
+    final_metrics = eval_metrics_on_loader(
+        model, test_loader,
+        dataset_profile=dataset_profile,
+        num_classes=num_classes,
+        use_amp=use_amp,
+    )
+    print(f"[Final Test] {format_metrics(final_metrics)}")
 
     if not hasattr(args, 'rank') or args.rank == 0:
-        wandb.log({
-            'Best_mIoU': final_test_iou,
-        })
+        log_dict = {f'Final/{k}': v for k, v in final_metrics.items()}
+        log_dict['Best_mIoU'] = final_metrics['miou']
+        wandb.log(log_dict)
 
     # Log retrain time
     retrain_end_time = time.time()
@@ -266,7 +274,7 @@ def train_samplenet(
         })
     print(f"OptimizedNetwork Inference Time: {mean_time:.4f} ± {std_time:.4f} ms (batch=1)")
 
-    if args.mode != 'ind':
+    if getattr(args, 'dataset_profile', 'hyundai') == 'hyundai' and args.mode != 'ind':
         # Test individual car model
         names = ["CE", "DF", "GN7 일반", "GN7 파노라마"]
         label_dir_name = getattr(args, 'label_dir_name', 'target')

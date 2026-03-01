@@ -27,10 +27,11 @@ def main():
     torch.backends.cudnn.deterministic = False  # deterministic=True triggers cuDNN internal graph capture
 
     data_name = args.data if isinstance(args.data, str) else "_".join(args.data)
+    dataset_profile = getattr(args, 'dataset_profile', 'hyundai')
     timestamp = str(datetime.now().date()) + "_" + datetime.now().strftime("%H_%M_%S")
-    args.log_dir = f"./hyundai/logs/comparison_{data_name}_seed{args.seed}/{timestamp}/"
+    args.log_dir = f"./hyundai/logs/comparison_{dataset_profile}_{data_name}_seed{args.seed}/{timestamp}/"
 
-    run_name = f"hyundai_comparison_seed{args.seed}"
+    run_name = f"hyundai_comparison_{dataset_profile}_seed{args.seed}"
     wandb_config = vars(args).copy()
     wandb_config["mode"] = "comparison"
     wandb_config["encoder_name"] = ",".join(args.baseline_models)

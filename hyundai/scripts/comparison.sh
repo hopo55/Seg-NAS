@@ -19,8 +19,15 @@ VISIBLE_GPUS="0,1"
 GPU_IDX=(0 1)
 
 # Data settings
+DATASET_PROFILE=${DATASET_PROFILE:-hyundai}
 DATA_DIR=${DATA_DIR:-'./dataset/image'}
 LABEL_DIR_NAME=${LABEL_DIR_NAME:-target}
+NUM_CLASSES=${NUM_CLASSES:-}
+PUBLIC_CATEGORIES=${PUBLIC_CATEGORIES:-}
+PUBLIC_VAL_HOLDOUT=${PUBLIC_VAL_HOLDOUT:-0.5}
+PUBLIC_MANIFEST=${PUBLIC_MANIFEST:-}
+PUBLIC_MAX_SAMPLES=${PUBLIC_MAX_SAMPLES:-}
+PUBLIC_USE_AUG=${PUBLIC_USE_AUG:-false}
 RESIZE=${RESIZE:-128}
 RESIZE_W=${RESIZE_W:-}
 RESIZE_H=${RESIZE_H:-}
@@ -50,14 +57,33 @@ fi
 run_baseline_comparison() {
     local SEED=$1
     local resize_args=(--resize "$RESIZE")
+    local dataset_args=(--dataset_profile "$DATASET_PROFILE" --public_val_holdout "$PUBLIC_VAL_HOLDOUT")
     if [ -n "$RESIZE_W" ] && [ -n "$RESIZE_H" ]; then
         resize_args+=(--resize_w "$RESIZE_W" --resize_h "$RESIZE_H")
+    fi
+    if [ -n "$NUM_CLASSES" ]; then
+        dataset_args+=(--num_classes "$NUM_CLASSES")
+    fi
+    if [ -n "$PUBLIC_CATEGORIES" ]; then
+        IFS=',' read -r -a CAT_ARR <<< "$PUBLIC_CATEGORIES"
+        dataset_args+=(--public_categories "${CAT_ARR[@]}")
+    fi
+    if [ -n "$PUBLIC_MANIFEST" ]; then
+        dataset_args+=(--public_manifest "$PUBLIC_MANIFEST")
+    fi
+    if [ -n "$PUBLIC_MAX_SAMPLES" ]; then
+        dataset_args+=(--public_max_samples "$PUBLIC_MAX_SAMPLES")
+    fi
+    if [ "$PUBLIC_USE_AUG" = "true" ]; then
+        dataset_args+=(--public_use_augmentation)
     fi
 
     echo "========================================"
     echo "BASELINE COMPARISON"
     echo "  Seed: $SEED"
     echo "  Models: ${BASELINE_MODELS[*]}"
+    echo "  Dataset Profile: $DATASET_PROFILE"
+    echo "  Data Root: $DATA_DIR"
     if [ -n "$RESIZE_W" ] && [ -n "$RESIZE_H" ]; then
         echo "  Resize: ${RESIZE_W}x${RESIZE_H}"
     else
@@ -71,6 +97,7 @@ run_baseline_comparison() {
         --data "$DATA" \
         --data_dir "$DATA_DIR" \
         --label_dir_name "$LABEL_DIR_NAME" \
+        "${dataset_args[@]}" \
         "${resize_args[@]}" \
         --ratios "$TEST_RATIO" \
         --gpu_idx "${GPU_IDX[@]}" \

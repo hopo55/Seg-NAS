@@ -3,6 +3,7 @@ import sys
 import pandas as pd
 from PIL import Image
 from utils.dataloaders import load_folder_model, load_zero_shot, set_transforms, PairedAugmentation, ImageDataset
+from utils.public_datasets import build_public_dataset
 from utils.input_size import get_resize_hw
 
 
@@ -117,6 +118,17 @@ def get_roi(names):
 
 
 def get_dataset(args):
+    dataset_profile = getattr(args, 'dataset_profile', 'hyundai')
+    if dataset_profile != 'hyundai':
+        dataset, metadata = build_public_dataset(args)
+        if getattr(args, 'num_classes', None) is None:
+            args.num_classes = metadata["num_classes"]
+        print(
+            f"Public dataset profile={metadata['profile']}, num_classes={metadata['num_classes']}, "
+            f"samples(train/val/test)={metadata['train_samples']}/{metadata['val_samples']}/{metadata['test_samples']}"
+        )
+        return dataset
+
     if args.mode in ['nas', 'hot'] and args.data != ['all']:
         print(f"Error: The '{args.data}' option cannot be used in modes other than 'nas' or 'hot'.")
         sys.exit(1)
@@ -144,6 +156,9 @@ def get_dataset(args):
     train_transform = PairedAugmentation(resize=args.resize, resize_h=resize_h, resize_w=resize_w)
     label_dir_name = getattr(args, 'label_dir_name', 'target')
     source_dir_name = os.path.basename(os.path.normpath(args.data_dir))
+
+    if getattr(args, 'num_classes', None) is None:
+        args.num_classes = 2
 
     if args.mode == 'hot':
         # set test dataset for hotstamping mode

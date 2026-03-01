@@ -39,8 +39,15 @@ export OMP_NUM_THREADS=$THREADS_PER_PROC
 export MKL_NUM_THREADS=$THREADS_PER_PROC
 
 # Data Settings
+DATASET_PROFILE=${DATASET_PROFILE:-hyundai}
 DATA_DIR=${DATA_DIR:-'./dataset/image'}
 LABEL_DIR_NAME=${LABEL_DIR_NAME:-target}
+NUM_CLASSES=${NUM_CLASSES:-}
+PUBLIC_CATEGORIES=${PUBLIC_CATEGORIES:-}
+PUBLIC_VAL_HOLDOUT=${PUBLIC_VAL_HOLDOUT:-0.5}
+PUBLIC_MANIFEST=${PUBLIC_MANIFEST:-}
+PUBLIC_MAX_SAMPLES=${PUBLIC_MAX_SAMPLES:-}
+PUBLIC_USE_AUG=${PUBLIC_USE_AUG:-false}
 # NOTE: Must match LUT input_size for latency-aware optimization.
 RESIZE=${RESIZE:-128}
 RESIZE_H=${RESIZE_H:-}
@@ -73,6 +80,12 @@ LATENCY_LAMBDA=1.0
 
 # Loss function: 'ce' (CrossEntropy) or 'dice_boundary' (CE+Dice+Boundary)
 LOSS_TYPE='dice_boundary'
+if [ "$DATASET_PROFILE" != "hyundai" ] && [ "$LOSS_TYPE" = "dice_boundary" ]; then
+    if [ -z "$NUM_CLASSES" ] || [ "$NUM_CLASSES" != "2" ]; then
+        echo "Info: dataset_profile=$DATASET_PROFILE -> overriding LOSS_TYPE from dice_boundary to ce"
+        LOSS_TYPE='ce'
+    fi
+fi
 
 # Target latencies (ms) for each hardware - cycle time constraint: 100ms
 # Actual speed order: RTX4090 > RTX3090 > A6000 > JetsonOrin > RaspberryPi5 > Odroid
@@ -327,6 +340,29 @@ build_accuracy_flags() {
     echo "$flags"
 }
 
+build_dataset_flags() {
+    local flags="--dataset_profile $DATASET_PROFILE --public_val_holdout $PUBLIC_VAL_HOLDOUT"
+    if [ -n "$NUM_CLASSES" ]; then
+        flags="$flags --num_classes $NUM_CLASSES"
+    fi
+    if [ -n "$PUBLIC_CATEGORIES" ]; then
+        IFS=',' read -r -a CAT_ARR <<< "$PUBLIC_CATEGORIES"
+        for cat in "${CAT_ARR[@]}"; do
+            flags="$flags --public_categories $cat"
+        done
+    fi
+    if [ -n "$PUBLIC_MANIFEST" ]; then
+        flags="$flags --public_manifest $PUBLIC_MANIFEST"
+    fi
+    if [ -n "$PUBLIC_MAX_SAMPLES" ]; then
+        flags="$flags --public_max_samples $PUBLIC_MAX_SAMPLES"
+    fi
+    if [ "$PUBLIC_USE_AUG" = "true" ]; then
+        flags="$flags --public_use_augmentation"
+    fi
+    echo "$flags"
+}
+
 build_hardware_targets_json() {
     local json="{"
     local first=true
@@ -349,6 +385,7 @@ run_pareto() {
     local CALOFA_FLAGS=$(build_calofa_flags)
     local MEMORY_FLAGS=$(build_memory_flags)
     local ACCURACY_FLAGS=$(build_accuracy_flags)
+    local DATASET_FLAGS=$(build_dataset_flags)
 
     echo "========================================"
     echo "PARETO-BASED NAS (RF-DETR Style)"
@@ -395,6 +432,7 @@ run_pareto() {
         --data $DATA \
         --data_dir $DATA_DIR \
         --label_dir_name $LABEL_DIR_NAME \
+        $DATASET_FLAGS \
         --resize $RESIZE \
         $RESIZE_HW_FLAGS \
         --ratios $TEST_RATIO \
@@ -434,6 +472,7 @@ run_single() {
     local CALOFA_FLAGS=$(build_calofa_flags)
     local MEMORY_FLAGS=$(build_memory_flags)
     local ACCURACY_FLAGS=$(build_accuracy_flags)
+    local DATASET_FLAGS=$(build_dataset_flags)
 
     if ! LUT_PATH=$(resolve_lut_path "$HARDWARE"); then
         echo "Error: LUT file not found for '$HARDWARE' in $LUT_DIR (suffix: '$LUT_SUFFIX')"
@@ -470,6 +509,7 @@ run_single() {
         --data $DATA \
         --data_dir $DATA_DIR \
         --label_dir_name $LABEL_DIR_NAME \
+        $DATASET_FLAGS \
         --resize $RESIZE \
         $RESIZE_HW_FLAGS \
         --ratios $TEST_RATIO \

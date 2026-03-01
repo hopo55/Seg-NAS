@@ -14,6 +14,29 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _to_class_indices(pred, target):
+    """Convert one-hot or class-index target to class-index tensor [B, H, W]."""
+    if target.dim() == pred.dim():
+        return torch.argmax(target, dim=1).long()
+    if target.dim() == pred.dim() - 1:
+        return target.long()
+    raise ValueError(
+        f"Unsupported target shape {tuple(target.shape)} for prediction shape {tuple(pred.shape)}"
+    )
+
+
+class CrossEntropyAutoTarget(nn.Module):
+    """CrossEntropy wrapper that accepts one-hot or class-index targets."""
+
+    def __init__(self):
+        super().__init__()
+        self.ce = nn.CrossEntropyLoss()
+
+    def forward(self, pred, target):
+        target_cls = _to_class_indices(pred, target)
+        return self.ce(pred, target_cls)
+
+
 class DiceBoundaryLoss(nn.Module):
     """Combined CE + Dice + Boundary-weighted loss for binary segmentation.
 
@@ -49,8 +72,11 @@ class DiceBoundaryLoss(nn.Module):
             Scalar loss tensor.
         """
         # --- 1. CrossEntropy Loss ---
+        if target.dim() == pred.dim() - 1:
+            target = F.one_hot(target.long(), num_classes=pred.shape[1]).permute(0, 3, 1, 2).float()
+
         # CE expects class indices [B, H, W], not one-hot
-        target_cls = torch.argmax(target, dim=1)  # [B, H, W]
+        target_cls = _to_class_indices(pred, target)
         ce_loss = self.ce(pred, target_cls)
 
         # --- 2. Soft Dice Loss ---
@@ -83,7 +109,7 @@ class DiceBoundaryLoss(nn.Module):
         return total
 
 
-def get_loss_function(loss_type='ce'):
+def get_loss_function(loss_type='ce', num_classes=2):
     """Factory function to create a loss by name.
 
     Args:
@@ -93,8 +119,10 @@ def get_loss_function(loss_type='ce'):
         nn.Module loss function.
     """
     if loss_type == 'ce':
-        return nn.CrossEntropyLoss()
+        return CrossEntropyAutoTarget()
     elif loss_type == 'dice_boundary':
+        if int(num_classes) != 2:
+            raise ValueError("dice_boundary loss supports only binary segmentation (num_classes=2).")
         return DiceBoundaryLoss()
     else:
         raise ValueError(f"Unknown loss type: {loss_type}. Choose from: ce, dice_boundary")

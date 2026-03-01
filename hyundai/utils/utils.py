@@ -1,3 +1,4 @@
+import contextlib
 import time
 import random
 import numpy as np
@@ -5,6 +6,9 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import segmentation_models_pytorch as smp
+
+# Dataset profiles that use anomaly-detection style evaluation.
+ANOMALY_PROFILES = {'mvtec_ad', 'mvtec_loco', 'visa'}
 
 
 def set_seed(seed):
@@ -101,18 +105,157 @@ def get_iou_score(outputs, labels):
         labels = labels.detach()
         outputs = outputs.detach()
 
-        labels = torch.argmax(labels, dim=1)    # target 기준으로 더 큰 경우만 1로 가져옴
-        labels = labels.long()
+        if labels.dim() == outputs.dim():
+            labels = torch.argmax(labels, dim=1)
+        elif labels.dim() == outputs.dim() - 1:
+            labels = labels.long()
+        else:
+            raise ValueError(
+                f"Unsupported label shape {tuple(labels.shape)} for output shape {tuple(outputs.shape)}"
+            )
 
         outputs = F.softmax(outputs, dim=1)
         _, predicted = torch.max(outputs, dim=1)
 
-        tp, fp, fn, tn = smp.metrics.get_stats(predicted, labels, mode="multiclass", num_classes=2)
+        num_classes = int(outputs.shape[1])
+        tp, fp, fn, tn = smp.metrics.get_stats(
+            predicted, labels, mode="multiclass", num_classes=num_classes
+        )
         iou_score = smp.metrics.iou_score(tp, fp, fn, tn)
 
         miou = iou_score.mean().item()
 
     return miou
+
+class MetricAccumulator:
+    """Accumulates segmentation metrics across batches (memory-efficient).
+
+    mIoU / F1  — via per-class tp/fp/fn/tn sum (no large tensor cache).
+    AUROC      — via pixel-level probability accumulation (anomaly profiles only).
+
+    Standard evaluation rules applied per profile:
+      • ade20k    : mIoU / F1 computed over classes 1-150 (class 0 = unlabeled, excluded).
+      • anomaly   : mIoU + F1 (binary) + pixel-level AUROC.
+      • others    : mIoU + F1 over all classes.
+    """
+
+    def __init__(self, dataset_profile: str, num_classes: int):
+        self.profile = dataset_profile.lower()
+        self.num_classes = num_classes
+        self.tp = torch.zeros(num_classes, dtype=torch.int64)
+        self.fp = torch.zeros(num_classes, dtype=torch.int64)
+        self.fn = torch.zeros(num_classes, dtype=torch.int64)
+        self._auroc_probs: list = [] if self.profile in ANOMALY_PROFILES else None
+        self._auroc_labels: list = [] if self.profile in ANOMALY_PROFILES else None
+
+    @torch.no_grad()
+    def update(self, outputs, labels):
+        """Process one batch.
+
+        Args:
+            outputs: logit tensor [B, C, H, W]
+            labels:  label tensor [B, H, W] long  OR  [B, C, H, W] one-hot
+        """
+        outputs = outputs.detach().cpu().float()
+        labels = labels.detach().cpu()
+
+        if labels.dim() == outputs.dim():
+            labels = torch.argmax(labels, dim=1)
+        labels = labels.long()
+
+        probs = F.softmax(outputs, dim=1)
+        predicted = probs.argmax(dim=1)
+
+        b_tp, b_fp, b_fn, _ = smp.metrics.get_stats(
+            predicted, labels, mode='multiclass', num_classes=self.num_classes
+        )
+        self.tp += b_tp.sum(0)
+        self.fp += b_fp.sum(0)
+        self.fn += b_fn.sum(0)
+
+        if self._auroc_probs is not None:
+            self._auroc_probs.append(probs[:, 1].flatten())
+            self._auroc_labels.append(labels.flatten())
+
+    def compute(self) -> dict:
+        """Return final metrics dict.
+
+        Keys always present : 'miou', 'f1'
+        Key 'auroc'         : only for anomaly profiles (nan if test set has only one class)
+        """
+        smooth = 1e-6
+        tp = self.tp.float()
+        fp = self.fp.float()
+        fn = self.fn.float()
+
+        per_class_iou = tp / (tp + fp + fn + smooth)
+        per_class_f1  = 2 * tp / (2 * tp + fp + fn + smooth)
+
+        if self.profile == 'ade20k':
+            # Exclude unlabeled class 0 from mean (standard MIT challenge metric)
+            miou = per_class_iou[1:].mean().item()
+            f1   = per_class_f1[1:].mean().item()
+        else:
+            miou = per_class_iou.mean().item()
+            f1   = per_class_f1.mean().item()
+
+        result = {'miou': miou, 'f1': f1}
+
+        if self._auroc_probs is not None:
+            from sklearn.metrics import roc_auc_score
+            all_probs  = torch.cat(self._auroc_probs).numpy()
+            all_labels = torch.cat(self._auroc_labels).numpy()
+            if len(np.unique(all_labels)) > 1 and not np.isnan(all_probs).any():
+                result['auroc'] = float(roc_auc_score(all_labels, all_probs))
+            else:
+                result['auroc'] = float('nan')
+
+        return result
+
+
+@torch.no_grad()
+def eval_metrics_on_loader(model, loader, dataset_profile='hyundai',
+                            num_classes=2, use_amp=False) -> dict:
+    """Evaluate model on a DataLoader and return a metrics dict.
+
+    Args:
+        model:          PyTorch model (DataParallel / DDP / plain)
+        loader:         DataLoader yielding (images, labels) batches
+        dataset_profile: one of 'hyundai', 'cityscapes', 'ade20k',
+                        'mvtec_ad', 'mvtec_loco', 'visa'
+        num_classes:    number of output classes
+        use_amp:        whether to run inference with FP16 AMP
+
+    Returns:
+        dict with 'miou', 'f1' (always) and 'auroc' (anomaly profiles).
+    """
+    if isinstance(model, (torch.nn.DataParallel,
+                           torch.nn.parallel.DistributedDataParallel)):
+        model.module.eval()
+    else:
+        model.eval()
+
+    device = next(model.parameters()).device
+    acc = MetricAccumulator(dataset_profile, num_classes)
+
+    amp_ctx = torch.cuda.amp.autocast if use_amp else contextlib.nullcontext
+    for data, labels in loader:
+        data = data.to(device, non_blocking=True)
+        with amp_ctx():
+            outputs = model(data)
+        acc.update(outputs, labels)
+
+    return acc.compute()
+
+
+def format_metrics(metrics: dict) -> str:
+    """Format metrics dict into a human-readable string."""
+    parts = [f"mIoU: {metrics['miou']:.4f}", f"F1: {metrics['f1']:.4f}"]
+    if 'auroc' in metrics:
+        auroc = metrics['auroc']
+        parts.append(f"AUROC: {auroc:.4f}" if not np.isnan(auroc) else "AUROC: n/a")
+    return ", ".join(parts)
+
 
 def capture(images):
     time_to_wait = round(len(images) * 0.1, 1)
